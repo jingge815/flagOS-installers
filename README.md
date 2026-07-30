@@ -4,6 +4,7 @@
 
 - `0-install-flagtree.sh`：安装 FlagTree/Triton 及其用户态依赖
 - `1-install-flaggems.sh`：在 FlagTree 环境之上安装并验证 FlagGems
+- `2-install-pytorch.sh`：从固定提交源码编译并安装 PyTorch
 
 ## 环境前提
 
@@ -235,12 +236,87 @@ TRITON_DUMP_DIR=../flagOS-installed/flagGems/triton-stage-dumps
 <prefix>/triton-stage-dumps
 ```
 
-## 3. PyTorch 安装
+## 3. 安装 PyTorch
 
-计划脚本：`2-install-pytorch.sh`
+安装脚本：`2-install-pytorch.sh`
 
-该脚本目前还未实现，后续会下载 PyTorch 源码并默认安装到
-`../flagOS-installed/pytorch`。
+该脚本可在 `0-install-flagtree.sh` 和 `1-install-flaggems.sh` 执行完成后运行，
+但不依赖它们的 Python 或环境脚本。它会在无 root 权限下自动准备独立 Python、
+CUDA 12.8 Toolkit、CUDA Python libraries、PyTorch Python 构建依赖，下载
+PyTorch 源码并编译安装 wheel。
+
+- 源码默认下载到 `./pytorch`
+- 默认安装目录是 `../flagOS-installed/pytorch`
+- 代码从 `https://github.com/pytorch/pytorch.git` 下载，并固定到提交 `d38164a545b4a4e4e0cf73ce67173f70574890b6`，对应 `v2.9.1`
+- 安装目录中会放置独立 Python、CUDA Toolkit、Python CUDA libraries、wheel、缓存、日志和环境脚本
+
+一键安装并验证：
+
+```bash
+bash 2-install-pytorch.sh
+```
+
+指定安装目录、源码目录和编译并行度：
+
+```bash
+bash 2-install-pytorch.sh \
+  --prefix /path/to/pytorch \
+  --source-dir /path/to/pytorch-source \
+  --max-jobs 16
+```
+
+只准备源码和依赖，不执行源码编译：
+
+```bash
+bash 2-install-pytorch.sh --skip-build
+```
+
+跳过安装后 CUDA smoke test：
+
+```bash
+bash 2-install-pytorch.sh --skip-test
+```
+
+删除已有 PyTorch 源码后重新 clone：
+
+```bash
+bash 2-install-pytorch.sh --force-reclone
+```
+
+### 重复执行行为
+
+后续重复执行时，脚本会复用已经存在且校验通过的下载包、独立 Python、
+CUDA Toolkit、pip cache、已生成 wheel 和干净的 `./pytorch` Git 源码目录。
+如果源码目录存在已跟踪修改或暂存修改，脚本会停止，避免覆盖本地改动。
+
+默认不会删除 PyTorch 源码目录中的 `build/`；如果怀疑旧构建缓存影响结果，
+可以加 `--clean-build`。
+
+### 使用环境
+
+安装完成后，先加载环境脚本：
+
+```bash
+source ../flagOS-installed/pytorch/env-pytorch.sh
+```
+
+基础验证：
+
+```bash
+python - <<'PY'
+import torch
+
+print("torch:", torch.__version__)
+print("cuda:", torch.version.cuda)
+print("cuda available:", torch.cuda.is_available())
+x = torch.randn((128, 128), device="cuda")
+y = torch.randn((128, 128), device="cuda")
+z = x @ y
+torch.cuda.synchronize()
+print("device:", torch.cuda.get_device_name(0))
+print("shape:", tuple(z.shape))
+PY
+```
 
 ## 4. 大模型推理
 

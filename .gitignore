@@ -1,5 +1,6 @@
 FlagTree/
 __pycache__/
 FlagGems/
+pytorch/
 model-inference/
 .superpowers/
