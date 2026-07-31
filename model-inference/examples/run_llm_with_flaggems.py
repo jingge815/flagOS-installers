@@ -55,8 +55,10 @@ def generate_once(
                 pad_token_id=tokenizer.eos_token_id,
             )
     torch.cuda.synchronize()
+    prompt_length = inputs["input_ids"].shape[-1]
+    new_token_ids = output_ids[0, prompt_length:]
     return (
-        tokenizer.decode(output_ids[0], skip_special_tokens=True),
+        tokenizer.decode(new_token_ids, skip_special_tokens=True),
         time.perf_counter() - start,
     )
 

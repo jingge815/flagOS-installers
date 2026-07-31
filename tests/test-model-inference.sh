@@ -17,6 +17,7 @@ grep -F -- '--skip-inference' <<<"$HELP_OUTPUT"
 python3 -m py_compile "$ENTRYPOINT"
 grep -F -- 'flag_gems.use_gems' "$ENTRYPOINT"
 grep -F -- 'AutoModelForCausalLM' "$ENTRYPOINT"
+grep -F -- 'new_token_ids' "$ENTRYPOINT"
 if grep -F -- 'tf_model*.h5' "$INSTALLER"; then
   echo "installer must not accept TensorFlow-only model weights" >&2
   exit 1
@@ -25,6 +26,8 @@ fi
 if [[ "${RUN_MODEL_INFERENCE_INTEGRATION:-0}" == 1 ]]; then
   PREFIX="${MODEL_INFERENCE_TEST_PREFIX:-$ROOT_DIR/../flagOS-installed/model-inference}"
   MODEL_ID="${MODEL_ID:-TinyLlama/TinyLlama-1.1B-Chat-v1.0}"
+  mkdir -p "$PREFIX/test-logs"
+  INSTALLER_OUTPUT="$PREFIX/test-logs/installer-$(date +%Y%m%d_%H%M%S).log"
   INSTALL_ARGS=(
     --prefix "$PREFIX"
     --model-id "$MODEL_ID"
@@ -36,7 +39,7 @@ if [[ "${RUN_MODEL_INFERENCE_INTEGRATION:-0}" == 1 ]]; then
   if [[ -n "${PYTORCH_MODE:-}" ]]; then
     INSTALL_ARGS+=(--pytorch-mode "$PYTORCH_MODE")
   fi
-  bash "$INSTALLER" "${INSTALL_ARGS[@]}"
+  bash "$INSTALLER" "${INSTALL_ARGS[@]}" 2>&1 | tee "$INSTALLER_OUTPUT"
 
   LOG_FILE=$(find "$PREFIX/logs" -maxdepth 1 -type f -name 'inference-*.log' \
     -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)
@@ -50,10 +53,17 @@ if [[ "${RUN_MODEL_INFERENCE_INTEGRATION:-0}" == 1 ]]; then
   grep -F -- 'torch:' "$LOG_FILE"
   grep -F -- 'flaggems_text:' "$LOG_FILE"
   awk '/flaggems_text:/{seen=1; next} seen && NF {found=1; exit} END{exit !found}' "$LOG_FILE"
+  if [[ -n "${EXPECT_RUNTIME_MODE:-}" ]]; then
+    grep -F -- "运行时模式：$EXPECT_RUNTIME_MODE" "$INSTALLER_OUTPUT"
+  fi
   LOG_BASENAME=$(basename -- "$LOG_FILE")
   RUN_TIMESTAMP=${LOG_BASENAME#inference-}
   RUN_TIMESTAMP=${RUN_TIMESTAMP%.log}
-  find "$PREFIX/artifacts/triton-dumps/$RUN_TIMESTAMP" -type f -size +0c -print -quit | grep -q .
+  ARTIFACT_FILE=$(find "$PREFIX/artifacts/triton-dumps/$RUN_TIMESTAMP" -type f -size +0c -print -quit)
+  [[ -n "$ARTIFACT_FILE" ]] || {
+    echo "missing non-empty Triton artifact for run timestamp $RUN_TIMESTAMP" >&2
+    exit 1
+  }
 fi
 
 printf 'model-inference static checks passed\n'
