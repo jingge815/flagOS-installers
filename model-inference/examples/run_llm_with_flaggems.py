@@ -64,8 +64,8 @@ def generate_once(
 def main() -> int:
     args = parse_args()
     model_path = Path(args.model_path).resolve()
-    if not model_path.exists():
-        raise SystemExit(f"model path does not exist: {model_path}")
+    if not model_path.is_dir():
+        raise SystemExit(f"model path is not a directory: {model_path}")
     if not torch.cuda.is_available():
         raise SystemExit("torch.cuda.is_available() is False")
 
