@@ -69,7 +69,7 @@ reject_newline_path() {
 
 canonicalize_path() {
   local path=$1
-  local target parent base
+  local target parent previous_parent base
 
   [[ -n "$path" ]] || die '路径不能为空。'
   reject_newline_path '路径' "$path"
@@ -86,8 +86,10 @@ canonicalize_path() {
     parent=$(dirname -- "$target")
     base=$(basename -- "$target")
     while [[ ! -d "$parent" ]]; do
+      previous_parent=$parent
       base="$(basename -- "$parent")/$base"
       parent=$(dirname -- "$parent")
+      [[ "$parent" != "$previous_parent" ]] || die "无法规范化路径：$path"
     done
     parent=$(cd -- "$parent" && pwd -P)
     printf '%s/%s\n' "$parent" "$base"
@@ -137,15 +139,15 @@ check_platform() {
 }
 
 validate_prerequisites() {
-  ENV_FLAGTREE="$FLAGTREE_PREFIX/env-flagtree.sh"
-  ENV_FLAGGEMS="$FLAGGEMS_PREFIX/env-flaggems.sh"
-  FLAGTREE_PYTHON="$FLAGTREE_PREFIX/python/bin/python"
-  INFERENCE_ENTRYPOINT="$SOURCE_DIR/examples/run_llm_with_flaggems.py"
+  local env_flagtree="$FLAGTREE_PREFIX/env-flagtree.sh"
+  local env_flaggems="$FLAGGEMS_PREFIX/env-flaggems.sh"
+  local flagtree_python="$FLAGTREE_PREFIX/python/bin/python"
+  local inference_entrypoint="$SOURCE_DIR/examples/run_llm_with_flaggems.py"
 
-  [[ -f "$ENV_FLAGTREE" ]] || die "找不到 FlagTree 环境脚本：$ENV_FLAGTREE。请先运行 0-install-flagtree.sh。"
-  [[ -f "$ENV_FLAGGEMS" ]] || die "找不到 FlagGems 环境脚本：$ENV_FLAGGEMS。请先运行 1-install-flaggems.sh。"
-  [[ -x "$FLAGTREE_PYTHON" ]] || die "找不到可执行的 FlagTree Python：$FLAGTREE_PYTHON。"
-  [[ -f "$INFERENCE_ENTRYPOINT" ]] || die "找不到推理入口：$INFERENCE_ENTRYPOINT。"
+  [[ -f "$env_flagtree" ]] || die "找不到 FlagTree 环境脚本：$env_flagtree。请先运行 0-install-flagtree.sh。"
+  [[ -f "$env_flaggems" ]] || die "找不到 FlagGems 环境脚本：$env_flaggems。请先运行 1-install-flaggems.sh。"
+  [[ -x "$flagtree_python" ]] || die "找不到可执行的 FlagTree Python：$flagtree_python。"
+  [[ -f "$inference_entrypoint" ]] || die "找不到推理入口：$inference_entrypoint。"
 
   if [[ "$PYTORCH_MODE" == compiled ]]; then
     [[ -d "$PYTORCH_PREFIX" ]] || die "找不到 PyTorch 安装目录：$PYTORCH_PREFIX。请先运行 2-install-pytorch.sh。"
@@ -282,13 +284,12 @@ reject_root_prefix '--prefix' "$PREFIX"
 reject_root_prefix '--flagtree-prefix' "$FLAGTREE_PREFIX"
 reject_root_prefix '--flaggems-prefix' "$FLAGGEMS_PREFIX"
 reject_root_prefix '--pytorch-prefix' "$PYTORCH_PREFIX"
+[[ -z "$LOCAL_DIR" ]] || reject_root_prefix '--local-dir' "$LOCAL_DIR"
 
 require_user_owned_path '--prefix' "$PREFIX"
-require_user_owned_path '--source-dir' "$SOURCE_DIR"
 require_user_owned_path '--flagtree-prefix' "$FLAGTREE_PREFIX"
 require_user_owned_path '--flaggems-prefix' "$FLAGGEMS_PREFIX"
 require_user_owned_path '--pytorch-prefix' "$PYTORCH_PREFIX"
-[[ -z "$MODEL_PATH" ]] || require_user_owned_path '--model-path' "$MODEL_PATH"
 [[ -z "$LOCAL_DIR" ]] || require_user_owned_path '--local-dir' "$LOCAL_DIR"
 
 check_platform
