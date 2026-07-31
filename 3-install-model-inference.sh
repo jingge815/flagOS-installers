@@ -343,7 +343,7 @@ require_usable_model_path() {
 
   [[ -d "$model_path" ]] || die "模型目录不存在：$model_path"
   [[ -f "$model_path/config.json" ]] || die "模型目录缺少 config.json：$model_path"
-  if find "$model_path" -type f \( -name '*.incomplete' -o -name '*.lock' \) -print -quit | grep -q .; then
+  if find "$model_path" -type f -name '*.incomplete' -print -quit | grep -q .; then
     die "模型目录存在未完成的 Hugging Face 下载标记：$model_path"
   fi
   "$RUNTIME_PYTHON" - "$model_path" <<'PY'
@@ -505,6 +505,22 @@ run_inference() {
   validate_generated_text "$log_file"
   printf 'Triton artifact directory: %s\n' "$triton_dump_dir"
   printf 'Inference log: %s\n' "$log_file"
+}
+
+print_runtime_versions() {
+  "$RUNTIME_PYTHON" - <<'PY'
+import sys
+from importlib import metadata
+
+import flag_gems
+import torch
+
+print("运行时版本确认：")
+print("python:", sys.executable)
+print("torch:", torch.__version__, torch.__file__)
+print("flag_gems:", metadata.version("flag_gems"), flag_gems.__file__)
+print("flagtree:", metadata.version("flagtree"))
+PY
 }
 
 write_model_inference_env() {
@@ -716,6 +732,8 @@ write_model_inference_env
 download_or_reuse_model
 run_stack_preflight
 run_inference
+
+print_runtime_versions
 
 note '模型推理安装器前置条件已通过。'
 printf '安装目录：%s\n' "$PREFIX"
