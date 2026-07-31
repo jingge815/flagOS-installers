@@ -21,10 +21,18 @@ grep -F -- 'AutoModelForCausalLM' "$ENTRYPOINT"
 if [[ "${RUN_MODEL_INFERENCE_INTEGRATION:-0}" == 1 ]]; then
   PREFIX="${MODEL_INFERENCE_TEST_PREFIX:-$ROOT_DIR/../flagOS-installed/model-inference}"
   MODEL_ID="${MODEL_ID:-TinyLlama/TinyLlama-1.1B-Chat-v1.0}"
-  bash "$INSTALLER" \
-    --prefix "$PREFIX" \
-    --model-id "$MODEL_ID" \
+  INSTALL_ARGS=(
+    --prefix "$PREFIX"
+    --model-id "$MODEL_ID"
     --max-new-tokens "${MAX_NEW_TOKENS:-8}"
+  )
+  if [[ -n "${MODEL_PATH:-}" ]]; then
+    INSTALL_ARGS+=(--model-path "$MODEL_PATH")
+  fi
+  if [[ -n "${PYTORCH_MODE:-}" ]]; then
+    INSTALL_ARGS+=(--pytorch-mode "$PYTORCH_MODE")
+  fi
+  bash "$INSTALLER" "${INSTALL_ARGS[@]}"
 
   LOG_FILE=$(find "$PREFIX/logs" -maxdepth 1 -type f -name 'inference-*.log' \
     -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)

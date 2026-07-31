@@ -321,6 +321,54 @@ require_usable_model_path() {
 
   [[ -d "$model_path" ]] || die "模型目录不存在：$model_path"
   [[ -f "$model_path/config.json" ]] || die "模型目录缺少 config.json：$model_path"
+  if find "$model_path" -type f \( -name '*.incomplete' -o -name '*.lock' \) -print -quit | grep -q .; then
+    die "模型目录存在未完成的 Hugging Face 下载标记：$model_path"
+  fi
+  "$RUNTIME_PYTHON" - "$model_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+model_path = Path(sys.argv[1])
+weight_patterns = (
+    "*.safetensors",
+    "pytorch_model*.bin",
+    "model*.bin",
+    "tf_model*.h5",
+)
+
+weights = [
+    path
+    for pattern in weight_patterns
+    for path in model_path.glob(pattern)
+    if path.is_file() and path.stat().st_size > 0
+]
+
+index_files = [
+    model_path / "model.safetensors.index.json",
+    model_path / "pytorch_model.bin.index.json",
+]
+for index_file in index_files:
+    if not index_file.exists():
+        continue
+    data = json.loads(index_file.read_text())
+    shard_names = sorted(set(data.get("weight_map", {}).values()))
+    missing = [
+        name
+        for name in shard_names
+        if not (model_path / name).is_file() or (model_path / name).stat().st_size == 0
+    ]
+    if missing:
+        raise SystemExit(f"model index references missing or empty shard files: {missing[:5]}")
+    if shard_names:
+        weights.extend(model_path / name for name in shard_names)
+
+if not weights:
+    raise SystemExit(
+        "model directory has config.json but no non-empty model weight files "
+        "(*.safetensors, pytorch_model*.bin, model*.bin, tf_model*.h5)"
+    )
+PY
 }
 
 download_or_reuse_model() {
