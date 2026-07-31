@@ -50,7 +50,10 @@ if [[ "${RUN_MODEL_INFERENCE_INTEGRATION:-0}" == 1 ]]; then
   grep -F -- 'torch:' "$LOG_FILE"
   grep -F -- 'flaggems_text:' "$LOG_FILE"
   awk '/flaggems_text:/{seen=1; next} seen && NF {found=1; exit} END{exit !found}' "$LOG_FILE"
-  find "$PREFIX/artifacts/triton-dumps" -type f -size +0c -print -quit | grep -q .
+  LOG_BASENAME=$(basename -- "$LOG_FILE")
+  RUN_TIMESTAMP=${LOG_BASENAME#inference-}
+  RUN_TIMESTAMP=${RUN_TIMESTAMP%.log}
+  find "$PREFIX/artifacts/triton-dumps/$RUN_TIMESTAMP" -type f -size +0c -print -quit | grep -q .
 fi
 
 printf 'model-inference static checks passed\n'

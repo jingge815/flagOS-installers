@@ -2,5 +2,7 @@ FlagTree/
 __pycache__/
 FlagGems/
 pytorch/
-model-inference/
+model-inference/models/
+model-inference/**/__pycache__/
+model-inference/**/*.pyc
 .superpowers/

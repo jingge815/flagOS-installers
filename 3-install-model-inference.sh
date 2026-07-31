@@ -225,6 +225,12 @@ select_runtime() {
 
 install_compiled_runtime_packages() {
   local flagtree_wheel flaggems_source
+  local flaggems_runtime_requirements=(
+    'packaging>=26'
+    'PyYAML==6.0.1'
+    'sqlalchemy==2.0.48'
+    'numpy'
+  )
 
   [[ "$RUNTIME_MODE" == compiled ]] || return 0
   source_runtime_envs
@@ -238,7 +244,23 @@ install_compiled_runtime_packages() {
     die "env-flaggems.sh 未导出有效的 FLAGGEMS_SOURCE：${flaggems_source:-空}。"
   PIP_CACHE_DIR="$PREFIX/pip-cache" "$RUNTIME_PYTHON" -m pip install --upgrade \
     'setuptools>=64,<77' 'setuptools-scm>=8,<10' 'wheel==0.45.0'
+  PIP_CACHE_DIR="$PREFIX/pip-cache" "$RUNTIME_PYTHON" -m pip install \
+    "${flaggems_runtime_requirements[@]}"
   "$RUNTIME_PYTHON" -m pip install --no-build-isolation --no-deps "$flaggems_source"
+  "$RUNTIME_PYTHON" - <<'PY'
+from importlib import metadata
+
+import flag_gems
+import torch
+import triton
+
+if not torch.cuda.is_available() or not torch.version.cuda:
+    raise SystemExit("compiled runtime does not provide CUDA PyTorch")
+flagtree_version = metadata.version("flagtree")
+flaggems_version = metadata.version("flag_gems")
+print(f"compiled_runtime_imports: torch={torch.__version__} triton={triton.__version__}")
+print(f"compiled_runtime_imports: flagtree={flagtree_version} flag_gems={flaggems_version}")
+PY
 }
 
 ensure_wheel_torch() {
