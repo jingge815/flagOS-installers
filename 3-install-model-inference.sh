@@ -154,6 +154,207 @@ validate_prerequisites() {
   fi
 }
 
+source_runtime_envs() {
+  # shellcheck disable=SC1090
+  source "$FLAGGEMS_PREFIX/env-flaggems.sh"
+  if [[ "${RUNTIME_MODE:-}" == compiled ]]; then
+    # shellcheck disable=SC1090
+    source "$PYTORCH_PREFIX/env-pytorch.sh"
+  fi
+}
+
+python_has_cuda_torch() {
+  local candidate_python=$1
+
+  [[ -x "$candidate_python" ]] || return 1
+  "$candidate_python" - <<'PY'
+import torch
+raise SystemExit(0 if torch.cuda.is_available() and torch.version.cuda else 1)
+PY
+}
+
+compiled_python_has_cuda_torch() {
+  local compiled_env="$PYTORCH_PREFIX/env-pytorch.sh"
+  local compiled_python="$PYTORCH_PREFIX/python/bin/python"
+
+  [[ -f "$compiled_env" && -x "$compiled_python" ]] || return 1
+  (
+    # shellcheck disable=SC1090
+    source "$compiled_env"
+    python_has_cuda_torch "$compiled_python"
+  )
+}
+
+newest_flagtree_wheel() {
+  find "$FLAGTREE_PREFIX/wheels" -maxdepth 1 -type f -name 'flagtree-*.whl' \
+    -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -n 1 | cut -d' ' -f2-
+}
+
+select_runtime() {
+  local flagtree_python="$FLAGTREE_PREFIX/python/bin/python"
+  local compiled_env="$PYTORCH_PREFIX/env-pytorch.sh"
+  local compiled_python="$PYTORCH_PREFIX/python/bin/python"
+
+  case "$PYTORCH_MODE" in
+    wheel)
+      RUNTIME_MODE=wheel
+      RUNTIME_PYTHON=$flagtree_python
+      ;;
+    compiled)
+      [[ -f "$compiled_env" ]] || \
+        die "compiled 模式需要 PyTorch 环境脚本：$compiled_env。请先运行 2-install-pytorch.sh，或改用 --pytorch-mode wheel。"
+      [[ -x "$compiled_python" ]] || \
+        die "compiled 模式需要可执行 Python：$compiled_python。请先运行 2-install-pytorch.sh，或改用 --pytorch-mode wheel。"
+      if ! compiled_python_has_cuda_torch; then
+        die "compiled 模式需要 $compiled_python 能导入 CUDA PyTorch。请确认编译安装成功，或改用 --pytorch-mode wheel。"
+      fi
+      RUNTIME_MODE=compiled
+      RUNTIME_PYTHON=$compiled_python
+      ;;
+    auto)
+      if compiled_python_has_cuda_torch; then
+        RUNTIME_MODE=compiled
+        RUNTIME_PYTHON=$compiled_python
+      else
+        RUNTIME_MODE=wheel
+        RUNTIME_PYTHON=$flagtree_python
+      fi
+      ;;
+  esac
+}
+
+install_compiled_runtime_packages() {
+  local flagtree_wheel flaggems_source
+
+  [[ "$RUNTIME_MODE" == compiled ]] || return 0
+  source_runtime_envs
+
+  flagtree_wheel=$(newest_flagtree_wheel)
+  [[ -n "$flagtree_wheel" ]] || die "找不到 FlagTree wheel：$FLAGTREE_PREFIX/wheels/flagtree-*.whl。"
+  "$RUNTIME_PYTHON" -m pip install --force-reinstall --no-deps "$flagtree_wheel"
+
+  flaggems_source=${FLAGGEMS_SOURCE:-}
+  [[ -n "$flaggems_source" && -d "$flaggems_source" ]] || \
+    die "env-flaggems.sh 未导出有效的 FLAGGEMS_SOURCE：${flaggems_source:-空}。"
+  "$RUNTIME_PYTHON" -m pip install --no-build-isolation --no-deps "$flaggems_source"
+}
+
+ensure_wheel_torch() {
+  [[ "$RUNTIME_MODE" == wheel ]] || return 0
+  source_runtime_envs
+
+  if ! python_has_cuda_torch "$RUNTIME_PYTHON"; then
+    PIP_CACHE_DIR="$PREFIX/pip-cache" "$RUNTIME_PYTHON" -m pip install \
+      --index-url https://download.pytorch.org/whl/cu128 \
+      'torch==2.7.1+cu128'
+  fi
+}
+
+missing_model_requirements() {
+  "$RUNTIME_PYTHON" - <<'PY'
+from importlib import metadata
+
+from packaging.requirements import Requirement
+
+requirements = [
+    "transformers>=4.43,<5",
+    "huggingface_hub>=0.23,<1",
+    "accelerate>=0.33,<2",
+    "safetensors>=0.4,<1",
+    "sentencepiece>=0.2,<1",
+]
+
+missing = []
+for raw in requirements:
+    requirement = Requirement(raw)
+    try:
+        version = metadata.version(requirement.name)
+    except metadata.PackageNotFoundError:
+        missing.append(raw)
+        continue
+    if version not in requirement.specifier:
+        missing.append(raw)
+
+print("\n".join(missing))
+raise SystemExit(1 if missing else 0)
+PY
+}
+
+ensure_model_dependencies() {
+  local requirements status
+
+  set +e
+  requirements=$(missing_model_requirements)
+  status=$?
+  set -e
+
+  [[ $status -eq 0 ]] && return 0
+  [[ -n "$requirements" ]] || die '模型推理依赖检查失败，但未返回缺失依赖。'
+
+  mapfile -t MODEL_REQUIREMENTS_TO_INSTALL <<<"$requirements"
+  PIP_CACHE_DIR="$PREFIX/pip-cache" "$RUNTIME_PYTHON" -m pip install "${MODEL_REQUIREMENTS_TO_INSTALL[@]}"
+
+  set +e
+  requirements=$(missing_model_requirements)
+  status=$?
+  set -e
+
+  [[ $status -eq 0 ]] || die "模型推理依赖安装后仍不满足：$requirements"
+}
+
+write_model_inference_env() {
+  local env_file="$PREFIX/env-model-inference.sh"
+
+  mkdir -p \
+    "$PREFIX" \
+    "$PREFIX/cache/huggingface" \
+    "$PREFIX/cache/huggingface/hub" \
+    "$PREFIX/cache/transformers" \
+    "$PREFIX/pip-cache" \
+    "$PREFIX/artifacts/triton-dumps"
+
+  cat >"$env_file" <<EOF
+# Source this file to use the FlagOS model inference runtime.
+if [[ "\${BASH_SOURCE[0]}" == "\$0" ]]; then
+  echo "env-model-inference.sh must be sourced, not executed." >&2
+  exit 1
+fi
+
+# shellcheck disable=SC1091
+source "$FLAGGEMS_PREFIX/env-flaggems.sh"
+EOF
+
+  if [[ "$RUNTIME_MODE" == compiled ]]; then
+    cat >>"$env_file" <<EOF
+# shellcheck disable=SC1091
+source "$PYTORCH_PREFIX/env-pytorch.sh"
+EOF
+  fi
+
+  cat >>"$env_file" <<EOF
+
+export MODEL_INFERENCE_PREFIX="$PREFIX"
+export MODEL_INFERENCE_ROOT="$SOURCE_DIR"
+export MODEL_INFERENCE_PYTHON="$RUNTIME_PYTHON"
+export HF_HOME="$PREFIX/cache/huggingface"
+export HF_HUB_CACHE="$PREFIX/cache/huggingface/hub"
+export TRANSFORMERS_CACHE="$PREFIX/cache/transformers"
+export PIP_CACHE_DIR="$PREFIX/pip-cache"
+export MODEL_INFERENCE_ARTIFACTS="$PREFIX/artifacts"
+export TRITON_DUMP_DIR="$PREFIX/artifacts/triton-dumps"
+export TRITON_ALWAYS_COMPILE=1
+export TRITON_KERNEL_DUMP=1
+
+mkdir -p \\
+  "\$HF_HOME" \\
+  "\$HF_HUB_CACHE" \\
+  "\$TRANSFORMERS_CACHE" \\
+  "\$PIP_CACHE_DIR" \\
+  "\$MODEL_INFERENCE_ARTIFACTS" \\
+  "\$TRITON_DUMP_DIR"
+EOF
+}
+
 PREFIX=$DEFAULT_PREFIX
 SOURCE_DIR=$DEFAULT_SOURCE_DIR
 FLAGTREE_PREFIX=$DEFAULT_FLAGTREE_PREFIX
@@ -294,6 +495,12 @@ require_user_owned_path '--pytorch-prefix' "$PYTORCH_PREFIX"
 
 check_platform
 validate_prerequisites
+mkdir -p "$PREFIX/pip-cache"
+select_runtime
+install_compiled_runtime_packages
+ensure_wheel_torch
+ensure_model_dependencies
+write_model_inference_env
 
 note '模型推理安装器前置条件已通过。'
 printf '安装目录：%s\n' "$PREFIX"
@@ -301,6 +508,8 @@ printf '源码目录：%s\n' "$SOURCE_DIR"
 printf 'FlagTree：%s\n' "$FLAGTREE_PREFIX"
 printf 'FlagGems：%s\n' "$FLAGGEMS_PREFIX"
 printf 'PyTorch 模式：%s\n' "$PYTORCH_MODE"
+printf '运行时模式：%s\n' "$RUNTIME_MODE"
+printf '运行时 Python：%s\n' "$RUNTIME_PYTHON"
 printf 'PyTorch 目录：%s\n' "$PYTORCH_PREFIX"
 printf '模型 ID：%s\n' "$MODEL_ID"
 [[ -z "$REVISION" ]] || printf '模型 revision：%s\n' "$REVISION"
@@ -310,4 +519,5 @@ printf '最大生成 token：%s\n' "$MAX_NEW_TOKENS"
 printf '跳过下载：%s\n' "$SKIP_DOWNLOAD"
 printf '跳过推理：%s\n' "$SKIP_INFERENCE"
 printf '对比 baseline：%s\n' "$COMPARE_BASELINE"
-note '当前任务未实现依赖安装、模型下载、preflight 或推理运行。'
+printf '环境文件：%s\n' "$PREFIX/env-model-inference.sh"
+note '当前任务未实现模型下载、stack preflight 或推理运行。'
