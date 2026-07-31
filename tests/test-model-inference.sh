@@ -17,6 +17,10 @@ grep -F -- '--skip-inference' <<<"$HELP_OUTPUT"
 python3 -m py_compile "$ENTRYPOINT"
 grep -F -- 'flag_gems.use_gems' "$ENTRYPOINT"
 grep -F -- 'AutoModelForCausalLM' "$ENTRYPOINT"
+if grep -F -- 'tf_model*.h5' "$INSTALLER"; then
+  echo "installer must not accept TensorFlow-only model weights" >&2
+  exit 1
+fi
 
 if [[ "${RUN_MODEL_INFERENCE_INTEGRATION:-0}" == 1 ]]; then
   PREFIX="${MODEL_INFERENCE_TEST_PREFIX:-$ROOT_DIR/../flagOS-installed/model-inference}"

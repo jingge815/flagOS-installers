@@ -334,7 +334,6 @@ weight_patterns = (
     "*.safetensors",
     "pytorch_model*.bin",
     "model*.bin",
-    "tf_model*.h5",
 )
 
 weights = [
@@ -366,7 +365,7 @@ for index_file in index_files:
 if not weights:
     raise SystemExit(
         "model directory has config.json but no non-empty model weight files "
-        "(*.safetensors, pytorch_model*.bin, model*.bin, tf_model*.h5)"
+        "(*.safetensors, pytorch_model*.bin, model*.bin)"
     )
 PY
 }
