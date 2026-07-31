@@ -160,4 +160,3 @@ asserts that:
 - the inference output is non-empty;
 - the run log identifies PyTorch, Triton, FlagTree, FlagGems, and the GPU;
 - Triton produced at least one non-empty compilation artifact.
-

@@ -501,4 +501,3 @@ git log --oneline -8
 ```
 
 Confirm that no model weights, cache files, logs, or Triton dumps are tracked.
-
