@@ -236,6 +236,8 @@ install_compiled_runtime_packages() {
   flaggems_source=${FLAGGEMS_SOURCE:-}
   [[ -n "$flaggems_source" && -d "$flaggems_source" ]] || \
     die "env-flaggems.sh 未导出有效的 FLAGGEMS_SOURCE：${flaggems_source:-空}。"
+  PIP_CACHE_DIR="$PREFIX/pip-cache" "$RUNTIME_PYTHON" -m pip install --upgrade \
+    'setuptools>=64,<77' 'setuptools-scm>=8,<10' 'wheel==0.45.0'
   "$RUNTIME_PYTHON" -m pip install --no-build-isolation --no-deps "$flaggems_source"
 }
 
@@ -304,6 +306,7 @@ ensure_model_dependencies() {
 
 write_model_inference_env() {
   local env_file="$PREFIX/env-model-inference.sh"
+  local flaggems_env_shell pytorch_env_shell prefix_shell source_shell runtime_python_shell
 
   mkdir -p \
     "$PREFIX" \
@@ -313,6 +316,12 @@ write_model_inference_env() {
     "$PREFIX/pip-cache" \
     "$PREFIX/artifacts/triton-dumps"
 
+  printf -v flaggems_env_shell '%q' "$FLAGGEMS_PREFIX/env-flaggems.sh"
+  printf -v pytorch_env_shell '%q' "$PYTORCH_PREFIX/env-pytorch.sh"
+  printf -v prefix_shell '%q' "$PREFIX"
+  printf -v source_shell '%q' "$SOURCE_DIR"
+  printf -v runtime_python_shell '%q' "$RUNTIME_PYTHON"
+
   cat >"$env_file" <<EOF
 # Source this file to use the FlagOS model inference runtime.
 if [[ "\${BASH_SOURCE[0]}" == "\$0" ]]; then
@@ -321,27 +330,27 @@ if [[ "\${BASH_SOURCE[0]}" == "\$0" ]]; then
 fi
 
 # shellcheck disable=SC1091
-source "$FLAGGEMS_PREFIX/env-flaggems.sh"
+source $flaggems_env_shell
 EOF
 
   if [[ "$RUNTIME_MODE" == compiled ]]; then
     cat >>"$env_file" <<EOF
 # shellcheck disable=SC1091
-source "$PYTORCH_PREFIX/env-pytorch.sh"
+source $pytorch_env_shell
 EOF
   fi
 
   cat >>"$env_file" <<EOF
 
-export MODEL_INFERENCE_PREFIX="$PREFIX"
-export MODEL_INFERENCE_ROOT="$SOURCE_DIR"
-export MODEL_INFERENCE_PYTHON="$RUNTIME_PYTHON"
-export HF_HOME="$PREFIX/cache/huggingface"
-export HF_HUB_CACHE="$PREFIX/cache/huggingface/hub"
-export TRANSFORMERS_CACHE="$PREFIX/cache/transformers"
-export PIP_CACHE_DIR="$PREFIX/pip-cache"
-export MODEL_INFERENCE_ARTIFACTS="$PREFIX/artifacts"
-export TRITON_DUMP_DIR="$PREFIX/artifacts/triton-dumps"
+export MODEL_INFERENCE_PREFIX=$prefix_shell
+export MODEL_INFERENCE_ROOT=$source_shell
+export MODEL_INFERENCE_PYTHON=$runtime_python_shell
+export HF_HOME="\$MODEL_INFERENCE_PREFIX/cache/huggingface"
+export HF_HUB_CACHE="\$MODEL_INFERENCE_PREFIX/cache/huggingface/hub"
+export TRANSFORMERS_CACHE="\$MODEL_INFERENCE_PREFIX/cache/transformers"
+export PIP_CACHE_DIR="\$MODEL_INFERENCE_PREFIX/pip-cache"
+export MODEL_INFERENCE_ARTIFACTS="\$MODEL_INFERENCE_PREFIX/artifacts"
+export TRITON_DUMP_DIR="\$MODEL_INFERENCE_PREFIX/artifacts/triton-dumps"
 export TRITON_ALWAYS_COMPILE=1
 export TRITON_KERNEL_DUMP=1
 
