@@ -44,7 +44,7 @@ usage() {
   -h, --help              显示帮助
 
 说明：
-  当前任务只实现参数、路径、平台和前置条件校验；不会安装依赖、下载模型或运行推理。
+  默认会下载或复用 Hugging Face 模型并运行一次 FlagGems 推理。
 EOF
 }
 
@@ -304,6 +304,140 @@ ensure_model_dependencies() {
   [[ $status -eq 0 ]] || die "模型推理依赖安装后仍不满足：$requirements"
 }
 
+model_id_to_dirname() {
+  local model_id=$1
+  printf '%s\n' "${model_id//\//-}"
+}
+
+configure_huggingface_cache() {
+  export HF_HOME="${HF_HOME:-$PREFIX/cache/huggingface}"
+  export HF_HUB_CACHE="${HF_HUB_CACHE:-$PREFIX/cache/huggingface/hub}"
+  export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$PREFIX/cache/transformers}"
+  mkdir -p "$HF_HOME" "$HF_HUB_CACHE" "$TRANSFORMERS_CACHE" "$PREFIX/models"
+}
+
+require_usable_model_path() {
+  local model_path=$1
+
+  [[ -d "$model_path" ]] || die "模型目录不存在：$model_path"
+  [[ -f "$model_path/config.json" ]] || die "模型目录缺少 config.json：$model_path"
+}
+
+download_or_reuse_model() {
+  local revision_arg=()
+
+  configure_huggingface_cache
+
+  if [[ -n "$MODEL_PATH" ]]; then
+    require_usable_model_path "$MODEL_PATH"
+    note '使用已有本地模型。'
+    return 0
+  fi
+
+  if [[ -z "$LOCAL_DIR" ]]; then
+    LOCAL_DIR="$PREFIX/models/$(model_id_to_dirname "$MODEL_ID")"
+  fi
+  MODEL_PATH=$LOCAL_DIR
+
+  if [[ "$SKIP_DOWNLOAD" -eq 1 ]]; then
+    require_usable_model_path "$MODEL_PATH"
+    note '跳过下载并复用本地模型。'
+    return 0
+  fi
+
+  mkdir -p "$MODEL_PATH"
+  [[ -z "$REVISION" ]] || revision_arg=(--revision "$REVISION")
+
+  note "下载或复用 Hugging Face 模型：$MODEL_ID"
+  "$RUNTIME_PYTHON" - "$MODEL_ID" "$MODEL_PATH" "${revision_arg[@]}" <<'PY'
+import argparse
+from huggingface_hub import snapshot_download
+
+parser = argparse.ArgumentParser()
+parser.add_argument("repo_id")
+parser.add_argument("local_dir")
+parser.add_argument("--revision")
+args = parser.parse_args()
+
+snapshot_download(
+    repo_id=args.repo_id,
+    revision=args.revision,
+    local_dir=args.local_dir,
+)
+PY
+
+  require_usable_model_path "$MODEL_PATH"
+}
+
+run_stack_preflight() {
+  [[ "$RUN_TEST" -eq 1 ]] || return 0
+
+  note '运行 CUDA / Triton / FlagGems preflight。'
+  "$RUNTIME_PYTHON" - <<'PY'
+import flag_gems
+import torch
+import triton
+
+print(f"torch: {torch.__version__} ({torch.__file__})")
+print(f"triton_import: {triton.__version__} ({triton.__file__})")
+print(f"flag_gems: {getattr(flag_gems, '__version__', 'unknown')} ({flag_gems.__file__})")
+if not torch.cuda.is_available():
+    raise SystemExit("torch.cuda.is_available() is False")
+print(f"gpu: {torch.cuda.get_device_name(0)}")
+with flag_gems.use_gems():
+    x = torch.arange(4, device="cuda", dtype=torch.float32)
+    y = x + 1
+torch.cuda.synchronize()
+if y.detach().cpu().tolist() != [1.0, 2.0, 3.0, 4.0]:
+    raise SystemExit("FlagGems CUDA tensor operation returned an unexpected result")
+print("flag_gems_preflight: ok")
+PY
+}
+
+validate_generated_text() {
+  local log_file=$1
+
+  awk '/flaggems_text:/{seen=1; next} seen && NF {found=1; exit} END{exit !found}' "$log_file" || \
+    die "推理日志未包含 flaggems_text: 后的非空生成文本：$log_file"
+}
+
+run_inference() {
+  local timestamp log_dir log_file triton_dump_dir
+  local inference_args=()
+
+  [[ "$SKIP_INFERENCE" -eq 0 ]] || return 0
+
+  require_usable_model_path "$MODEL_PATH"
+  timestamp=$(date +%Y%m%d_%H%M%S)
+  log_dir="$PREFIX/logs"
+  log_file="$log_dir/inference-$timestamp.log"
+  triton_dump_dir="$PREFIX/artifacts/triton-dumps/$timestamp"
+  mkdir -p "$log_dir" "$triton_dump_dir"
+
+  export TRITON_ALWAYS_COMPILE=1
+  export TRITON_KERNEL_DUMP=1
+  export TRITON_DUMP_DIR=$triton_dump_dir
+
+  inference_args=(
+    "$RUNTIME_PYTHON" "$SOURCE_DIR/examples/run_llm_with_flaggems.py"
+    --model-path "$MODEL_PATH"
+    --prompt "$PROMPT"
+    --max-new-tokens "$MAX_NEW_TOKENS"
+  )
+  if [[ "$COMPARE_BASELINE" -eq 1 ]]; then
+    inference_args+=(--compare-baseline)
+  fi
+
+  note '运行 FlagGems 模型推理。'
+  if ! "${inference_args[@]}" 2>&1 | tee "$log_file"; then
+    die "推理运行失败，日志：$log_file"
+  fi
+
+  validate_generated_text "$log_file"
+  printf 'Triton artifact directory: %s\n' "$triton_dump_dir"
+  printf 'Inference log: %s\n' "$log_file"
+}
+
 write_model_inference_env() {
   local env_file="$PREFIX/env-model-inference.sh"
   local flaggems_env_shell pytorch_env_shell prefix_shell source_shell runtime_python_shell
@@ -510,6 +644,9 @@ install_compiled_runtime_packages
 ensure_wheel_torch
 ensure_model_dependencies
 write_model_inference_env
+download_or_reuse_model
+run_stack_preflight
+run_inference
 
 note '模型推理安装器前置条件已通过。'
 printf '安装目录：%s\n' "$PREFIX"
@@ -529,4 +666,3 @@ printf '跳过下载：%s\n' "$SKIP_DOWNLOAD"
 printf '跳过推理：%s\n' "$SKIP_INFERENCE"
 printf '对比 baseline：%s\n' "$COMPARE_BASELINE"
 printf '环境文件：%s\n' "$PREFIX/env-model-inference.sh"
-note '当前任务未实现模型下载、stack preflight 或推理运行。'
