@@ -5,6 +5,8 @@
 - `0-install-flagtree.sh`：安装 FlagTree/Triton 及其用户态依赖
 - `1-install-flaggems.sh`：在 FlagTree 环境之上安装并验证 FlagGems
 - `2-install-pytorch.sh`：从固定提交源码编译并安装 PyTorch
+- `3-install-model-inference.sh`：下载或复用 Hugging Face 模型，并运行
+  FlagGems 大模型推理
 
 ## 环境前提
 
@@ -320,7 +322,84 @@ PY
 
 ## 4. 大模型推理
 
-计划脚本：`3-install-model-inference.sh`
+安装脚本：`3-install-model-inference.sh`
 
-该脚本目前还未实现，后续会基于前面安装的 FlagTree、FlagGems 或系统
-PyTorch 环境配置模型推理。
+该脚本需要在 `0-install-flagtree.sh` 和 `1-install-flaggems.sh` 成功执行后
+运行。`2-install-pytorch.sh` 是可选步骤：如果已经运行并且
+`../flagOS-installed/pytorch/env-pytorch.sh` 中的 Python 能导入 CUDA PyTorch，
+推理脚本会在 `auto` 模式下优先使用该编译版 PyTorch；否则使用 FlagTree
+Python 并按需下载 CUDA PyTorch wheel。
+
+推荐执行顺序：
+
+```bash
+bash 0-install-flagtree.sh
+bash 1-install-flaggems.sh
+# 可选：需要验证源码编译 PyTorch 时再执行
+bash 2-install-pytorch.sh
+bash 3-install-model-inference.sh
+```
+
+全流程不需要 root 权限。脚本会复用已有安装目录和 pip/Hugging Face cache，
+缺少模型推理依赖时才用所选 Python 自动安装。
+
+- 本地源码快照：`./model-inference`
+- 默认安装目录：`../flagOS-installed/model-inference`
+- 默认模型：`TinyLlama/TinyLlama-1.1B-Chat-v1.0`
+- 默认模型目录：`../flagOS-installed/model-inference/models/TinyLlama-TinyLlama-1.1B-Chat-v1.0`
+- 环境脚本：`../flagOS-installed/model-inference/env-model-inference.sh`
+- 推理日志：`../flagOS-installed/model-inference/logs/inference-YYYYMMDD_HHMMSS.log`
+- Triton dump：`../flagOS-installed/model-inference/artifacts/triton-dumps/<timestamp>/`
+
+一键下载或复用默认模型并运行推理：
+
+```bash
+bash 3-install-model-inference.sh
+```
+
+显式指定 Hugging Face 模型：
+
+```bash
+bash 3-install-model-inference.sh --model-id TinyLlama/TinyLlama-1.1B-Chat-v1.0
+```
+
+只安装依赖和下载模型，不运行推理：
+
+```bash
+bash 3-install-model-inference.sh --skip-inference
+```
+
+强制使用 FlagTree Python 和 PyTorch wheel，不使用源码编译版 PyTorch：
+
+```bash
+bash 3-install-model-inference.sh --pytorch-mode wheel
+```
+
+复用已经下载好的本地模型目录：
+
+```bash
+bash 3-install-model-inference.sh \
+  --model-path /path/to/TinyLlama-TinyLlama-1.1B-Chat-v1.0 \
+  --prompt "Explain FlagGems in one sentence." \
+  --max-new-tokens 32
+```
+
+指定自定义安装前缀：
+
+```bash
+bash 3-install-model-inference.sh \
+  --prefix /path/to/model-inference-prefix \
+  --flagtree-prefix /path/to/flagTree \
+  --flaggems-prefix /path/to/flagGems \
+  --pytorch-prefix /path/to/pytorch
+```
+
+安装完成后加载推理环境：
+
+```bash
+source ../flagOS-installed/model-inference/env-model-inference.sh
+```
+
+`model-inference/` 目录只提交必要的推理入口和说明文件。大模型权重通常较大，
+默认下载到安装前缀下的 `models/`，不要提交到 Git；只有很小的测试模型资产才
+可以放入 `model-inference/models/` 并随仓库提交。
