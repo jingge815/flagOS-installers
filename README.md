@@ -341,29 +341,35 @@ bash 3-install-model-inference.sh
 ```
 
 全流程不需要 root 权限。脚本会复用已有安装目录和 pip/Hugging Face cache，
-缺少模型推理依赖时才用所选 Python 自动安装。
+缺少模型推理依赖时才用所选 Python 自动安装。默认模型为 Python 内置随机初始化
+GPT-2，小配置为 `n_layer=4`、`n_head=8`、`n_embd=512`、`max_seq=128`，
+不下载模型权重。
 
 - 本地源码快照：`./model-inference`
 - 默认安装目录：`../flagOS-installed/model-inference`
-- 默认模型：`TinyLlama/TinyLlama-1.1B-Chat-v1.0`
-- 默认模型目录：`../flagOS-installed/model-inference/models/TinyLlama-TinyLlama-1.1B-Chat-v1.0`
+- 默认模型：`builtin-gpt2-random`
+- 默认模型目录：无，默认不下载模型
 - 环境脚本：`../flagOS-installed/model-inference/env-model-inference.sh`
 - 推理日志：`../flagOS-installed/model-inference/logs/inference-YYYYMMDD_HHMMSS.log`
 - Triton dump：`../flagOS-installed/model-inference/artifacts/triton-dumps/<timestamp>/`
 
-一键下载或复用默认模型并运行推理：
+一键运行内置随机初始化 GPT-2 推理：
 
 ```bash
 bash 3-install-model-inference.sh
 ```
 
-显式指定 Hugging Face 模型：
+脚本会验证推理日志包含 `inference_status: ok`、正整数
+`flaggems_generated_tokens` 和非空 `flaggems_text`，通过时会打印日志路径和
+Triton dump 目录。
+
+显式指定 Hugging Face 模型时才会下载或复用模型：
 
 ```bash
 bash 3-install-model-inference.sh --model-id TinyLlama/TinyLlama-1.1B-Chat-v1.0
 ```
 
-只安装依赖和下载模型，不运行推理：
+只安装依赖，不运行推理：
 
 ```bash
 bash 3-install-model-inference.sh --skip-inference

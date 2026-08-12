@@ -9,9 +9,11 @@ DEFAULT_SOURCE_DIR="$SCRIPT_DIR/model-inference"
 DEFAULT_FLAGTREE_PREFIX="$SCRIPT_DIR/../flagOS-installed/flagTree"
 DEFAULT_FLAGGEMS_PREFIX="$SCRIPT_DIR/../flagOS-installed/flagGems"
 DEFAULT_PYTORCH_PREFIX="$SCRIPT_DIR/../flagOS-installed/pytorch"
-DEFAULT_MODEL_ID="TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+DEFAULT_MODEL_BACKEND="builtin-gpt2"
+BUILTIN_MODEL_NAME="builtin-gpt2-random"
 DEFAULT_PROMPT="Explain in one sentence what FlagGems does for PyTorch."
 DEFAULT_MAX_NEW_TOKENS=32
+DEFAULT_MAX_SEQ=128
 
 PYTORCH_MODE=auto
 RUN_TEST=1
@@ -31,12 +33,13 @@ usage() {
   --flaggems-prefix DIR   1-install-flaggems.sh 安装目录，默认：../flagOS-installed/flagGems
   --pytorch-prefix DIR    2-install-pytorch.sh 安装目录，默认：../flagOS-installed/pytorch
   --pytorch-mode MODE     PyTorch 来源：auto、compiled 或 wheel，默认：auto
-  --model-id ID           Hugging Face 模型 ID，默认：$DEFAULT_MODEL_ID
+  --model-id ID           使用 Hugging Face 模型 ID（会下载或复用模型）
   --revision REV          Hugging Face 模型 revision
-  --model-path DIR        已下载的本地模型目录
+  --model-path DIR        使用已下载的本地 Hugging Face 模型目录
   --local-dir DIR         模型下载目录
   --prompt TEXT           推理提示词，默认：$DEFAULT_PROMPT
   --max-new-tokens N      生成 token 数，默认：$DEFAULT_MAX_NEW_TOKENS
+  --max-seq N             内置 GPT-2 最大序列长度，默认：$DEFAULT_MAX_SEQ
   --skip-test             跳过 NVIDIA GPU 可用性检查
   --skip-download         跳过模型下载
   --skip-inference        跳过推理运行
@@ -44,7 +47,8 @@ usage() {
   -h, --help              显示帮助
 
 说明：
-  默认会下载或复用 Hugging Face 模型并运行一次 FlagGems 推理。
+  默认使用内置随机初始化 GPT-2（n_layer=4, n_head=8, n_embd=512, max_seq=128），
+  不下载模型；传入 --model-id 或 --model-path 时切换到 Hugging Face 模型。
 EOF
 }
 
@@ -466,6 +470,10 @@ PY
 validate_generated_text() {
   local log_file=$1
 
+  awk '/^inference_status: ok /{found=1; exit} END{exit !found}' "$log_file" || \
+    die "推理日志未包含 inference_status: ok：$log_file"
+  awk '/^flaggems_generated_tokens:[[:space:]]+[1-9][0-9]*$/{found=1; exit} END{exit !found}' "$log_file" || \
+    die "推理日志未包含有效的 flaggems_generated_tokens：$log_file"
   awk '/flaggems_text:/{seen=1; next} seen && NF {found=1; exit} END{exit !found}' "$log_file" || \
     die "推理日志未包含 flaggems_text: 后的非空生成文本：$log_file"
 }
@@ -476,7 +484,9 @@ run_inference() {
 
   [[ "$SKIP_INFERENCE" -eq 0 ]] || return 0
 
-  require_usable_model_path "$MODEL_PATH"
+  if [[ "$MODEL_BACKEND" == huggingface ]]; then
+    require_usable_model_path "$MODEL_PATH"
+  fi
   timestamp=$(date +%Y%m%d_%H%M%S)
   log_dir="$PREFIX/logs"
   log_file="$log_dir/inference-$timestamp.log"
@@ -489,10 +499,17 @@ run_inference() {
 
   inference_args=(
     "$RUNTIME_PYTHON" "$SOURCE_DIR/examples/run_llm_with_flaggems.py"
-    --model-path "$MODEL_PATH"
     --prompt "$PROMPT"
     --max-new-tokens "$MAX_NEW_TOKENS"
   )
+  if [[ "$MODEL_BACKEND" == builtin-gpt2 ]]; then
+    inference_args+=(
+      --builtin-model "$BUILTIN_MODEL_NAME"
+      --max-seq "$MAX_SEQ"
+    )
+  else
+    inference_args+=(--model-path "$MODEL_PATH")
+  fi
   if [[ "$COMPARE_BASELINE" -eq 1 ]]; then
     inference_args+=(--compare-baseline)
   fi
@@ -588,12 +605,14 @@ SOURCE_DIR=$DEFAULT_SOURCE_DIR
 FLAGTREE_PREFIX=$DEFAULT_FLAGTREE_PREFIX
 FLAGGEMS_PREFIX=$DEFAULT_FLAGGEMS_PREFIX
 PYTORCH_PREFIX=$DEFAULT_PYTORCH_PREFIX
-MODEL_ID=$DEFAULT_MODEL_ID
+MODEL_BACKEND=$DEFAULT_MODEL_BACKEND
+MODEL_ID=
 REVISION=
 MODEL_PATH=
 LOCAL_DIR=
 PROMPT=$DEFAULT_PROMPT
 MAX_NEW_TOKENS=$DEFAULT_MAX_NEW_TOKENS
+MAX_SEQ=$DEFAULT_MAX_SEQ
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -630,6 +649,7 @@ while [[ $# -gt 0 ]]; do
     --model-id)
       [[ $# -ge 2 ]] || die '--model-id 缺少参数。'
       MODEL_ID=$2
+      MODEL_BACKEND=huggingface
       shift 2
       ;;
     --revision)
@@ -640,6 +660,7 @@ while [[ $# -gt 0 ]]; do
     --model-path)
       [[ $# -ge 2 ]] || die '--model-path 缺少目录参数。'
       MODEL_PATH=$2
+      MODEL_BACKEND=huggingface
       shift 2
       ;;
     --local-dir)
@@ -655,6 +676,11 @@ while [[ $# -gt 0 ]]; do
     --max-new-tokens)
       [[ $# -ge 2 && $2 =~ ^[1-9][0-9]*$ ]] || die '--max-new-tokens 必须是正整数。'
       MAX_NEW_TOKENS=$2
+      shift 2
+      ;;
+    --max-seq)
+      [[ $# -ge 2 && $2 =~ ^[1-9][0-9]*$ ]] || die '--max-seq 必须是正整数。'
+      MAX_SEQ=$2
       shift 2
       ;;
     --skip-test)
@@ -688,10 +714,18 @@ done
 [[ -n "$FLAGTREE_PREFIX" ]] || die '--flagtree-prefix 不能为空。'
 [[ -n "$FLAGGEMS_PREFIX" ]] || die '--flaggems-prefix 不能为空。'
 [[ -n "$PYTORCH_PREFIX" ]] || die '--pytorch-prefix 不能为空。'
-[[ -n "$MODEL_ID" ]] || die '--model-id 不能为空。'
+if [[ "$MODEL_BACKEND" == huggingface && -z "$MODEL_PATH" ]]; then
+  [[ -n "$MODEL_ID" ]] || die 'Hugging Face 模式需要 --model-id 或 --model-path。'
+fi
+if [[ "$MODEL_BACKEND" == builtin-gpt2 ]]; then
+  [[ -z "$REVISION" ]] || die '--revision 仅适用于 Hugging Face 模型，请同时指定 --model-id。'
+  [[ -z "$LOCAL_DIR" ]] || die '--local-dir 仅适用于 Hugging Face 模型，请同时指定 --model-id。'
+fi
 [[ -n "$PROMPT" ]] || die '--prompt 不能为空。'
 [[ "$PYTORCH_MODE" == auto || "$PYTORCH_MODE" == compiled || "$PYTORCH_MODE" == wheel ]] || \
   die '--pytorch-mode 必须是 auto、compiled 或 wheel。'
+[[ "$MODEL_BACKEND" == builtin-gpt2 || "$MODEL_BACKEND" == huggingface ]] || \
+  die '内部错误：未知模型后端。'
 
 reject_newline_path '--prefix' "$PREFIX"
 reject_newline_path '--source-dir' "$SOURCE_DIR"
@@ -729,7 +763,11 @@ install_compiled_runtime_packages
 ensure_wheel_torch
 ensure_model_dependencies
 write_model_inference_env
-download_or_reuse_model
+if [[ "$MODEL_BACKEND" == huggingface ]]; then
+  download_or_reuse_model
+else
+  configure_huggingface_cache
+fi
 run_stack_preflight
 run_inference
 
@@ -744,11 +782,17 @@ printf 'PyTorch 模式：%s\n' "$PYTORCH_MODE"
 printf '运行时模式：%s\n' "$RUNTIME_MODE"
 printf '运行时 Python：%s\n' "$RUNTIME_PYTHON"
 printf 'PyTorch 目录：%s\n' "$PYTORCH_PREFIX"
-printf '模型 ID：%s\n' "$MODEL_ID"
+printf '模型后端：%s\n' "$MODEL_BACKEND"
+if [[ "$MODEL_BACKEND" == builtin-gpt2 ]]; then
+  printf '内置模型：%s\n' "$BUILTIN_MODEL_NAME"
+  printf '内置 GPT-2 配置：n_layer=4 n_head=8 n_embd=512 max_seq=%s\n' "$MAX_SEQ"
+fi
+[[ -z "$MODEL_ID" ]] || printf '模型 ID：%s\n' "$MODEL_ID"
 [[ -z "$REVISION" ]] || printf '模型 revision：%s\n' "$REVISION"
 [[ -z "$MODEL_PATH" ]] || printf '本地模型目录：%s\n' "$MODEL_PATH"
 [[ -z "$LOCAL_DIR" ]] || printf '模型下载目录：%s\n' "$LOCAL_DIR"
 printf '最大生成 token：%s\n' "$MAX_NEW_TOKENS"
+printf '最大序列长度：%s\n' "$MAX_SEQ"
 printf '跳过下载：%s\n' "$SKIP_DOWNLOAD"
 printf '跳过推理：%s\n' "$SKIP_INFERENCE"
 printf '对比 baseline：%s\n' "$COMPARE_BASELINE"
