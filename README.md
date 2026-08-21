@@ -330,6 +330,42 @@ PY
 推理脚本会在 `auto` 模式下优先使用该编译版 PyTorch；否则使用 FlagTree
 Python 并按需下载 CUDA PyTorch wheel。
 
+### 手动下载默认 Llama 2 7B HF 模型（必需）
+
+默认模型是 Hugging Face 的 **HF 格式**检查点
+[`meta-llama/Llama-2-7b-hf`](https://huggingface.co/meta-llama/Llama-2-7b-hf)，
+不是 GGUF 或其他 Llama 2 变体。该模型是 gated model；**授权和下载必须手动
+完成**，安装脚本不会代为注册、申请授权或绕过访问限制。
+
+1. 打开上面的模型页面，用邮箱注册或登录 Hugging Face，按页面提示申请并接受
+   Llama 2 的访问条款。只有页面显示 `You have been granted access to this model`
+   后，才可以下载。
+2. 在 Hugging Face 的 [Access Tokens 页面](https://huggingface.co/settings/tokens)
+   创建可读取模型的 token。
+3. 安装 Hugging Face 的 **`hf`** 命令（后续命令使用 `hf`，不是旧的
+   `huggingface-cli`）：
+
+   ```bash
+   python3 -m pip install -U "huggingface_hub[cli]"
+   hf --help
+   ```
+
+4. 通过代理手动下载 HF 格式的 `Llama-2-7b-hf` 检查点；把 `xxx` 替换为上一步
+   创建的 token：
+
+   ```bash
+   http_proxy=http://127.0.0.1:7500 \
+   https_proxy=http://127.0.0.1:7500 \
+   all_proxy=http://127.0.0.1:7500 \
+   hf download meta-llama/Llama-2-7b-hf \
+     --local-dir /home/fengjingge/.llama/checkpoints/Llama-2-7b-hf \
+     --token xxx
+   ```
+
+下载完成后，使用
+`--model-path ~/.llama/checkpoints/Llama-2-7b-hf` 让安装脚本复用
+这个本地 HF 格式模型目录。
+
 推荐执行顺序：
 
 ```bash
@@ -337,17 +373,16 @@ bash 0-install-flagtree.sh
 bash 1-install-flaggems.sh
 # 可选：需要验证源码编译 PyTorch 时再执行
 bash 2-install-pytorch.sh
-export HF_TOKEN=<your-token>
-bash 3-install-model-inference.sh --skip-inference
-bash 3-install-model-inference.sh --skip-download --skip-inference
-bash 3-install-model-inference.sh
+# 完成上面的 Hugging Face 授权和手动下载后，复用本地 HF 格式模型
+bash 3-install-model-inference.sh \
+  --model-path /home/fengjingge/.llama/checkpoints/Llama-2-7b-hf
 ```
 
 全流程不需要 root 权限。脚本会复用已有安装目录和 pip/Hugging Face cache，
 缺少模型推理依赖时才用所选 Python 自动安装。默认模型为 Hugging Face 官方
-`Llama-2-7b-hf`；官方 LLaMA2 仓库需要 HuggingFace 授权，请先设置
-`HF_TOKEN` 或运行 `huggingface-cli login`。模型目录完整时会复用，否则下载；下载
-或访问失败时不会回退到 GPT-2、TinyLlama 或随机权重。
+`Llama-2-7b-hf`。请先按上节手动完成 Hugging Face 授权和下载；模型目录完整时会
+复用，否则脚本会尝试下载。下载或访问失败时不会回退到 GPT-2、TinyLlama 或随机
+权重。
 
 - 本地源码快照：`./model-inference`
 - 默认安装目录：`../flagOS-installed/model-inference`
