@@ -337,23 +337,27 @@ bash 0-install-flagtree.sh
 bash 1-install-flaggems.sh
 # 可选：需要验证源码编译 PyTorch 时再执行
 bash 2-install-pytorch.sh
+export HF_TOKEN=<your-token>
+bash 3-install-model-inference.sh --skip-inference
+bash 3-install-model-inference.sh --skip-download --skip-inference
 bash 3-install-model-inference.sh
 ```
 
 全流程不需要 root 权限。脚本会复用已有安装目录和 pip/Hugging Face cache，
-缺少模型推理依赖时才用所选 Python 自动安装。默认模型为 Python 内置随机初始化
-GPT-2，小配置为 `n_layer=4`、`n_head=8`、`n_embd=512`、`max_seq=128`，
-不下载模型权重。
+缺少模型推理依赖时才用所选 Python 自动安装。默认模型为 Hugging Face 官方
+`Llama-2-7b-hf`；官方 LLaMA2 仓库需要 HuggingFace 授权，请先设置
+`HF_TOKEN` 或运行 `huggingface-cli login`。模型目录完整时会复用，否则下载；下载
+或访问失败时不会回退到 GPT-2、TinyLlama 或随机权重。
 
 - 本地源码快照：`./model-inference`
 - 默认安装目录：`../flagOS-installed/model-inference`
-- 默认模型：`builtin-gpt2-random`
-- 默认模型目录：无，默认不下载模型
+- 默认模型：`Llama-2-7b-hf`
+- 默认模型目录：`/media/disk/fengjingge/src/flagOS/flagOS-installed/model-inference/models/Llama-2-7b-hf`
 - 环境脚本：`../flagOS-installed/model-inference/env-model-inference.sh`
 - 推理日志：`../flagOS-installed/model-inference/logs/inference-YYYYMMDD_HHMMSS.log`
 - Triton dump：`../flagOS-installed/model-inference/artifacts/triton-dumps/<timestamp>/`
 
-一键运行内置随机初始化 GPT-2 推理：
+下载或复用默认模型并运行推理：
 
 ```bash
 bash 3-install-model-inference.sh
@@ -363,16 +367,11 @@ bash 3-install-model-inference.sh
 `flaggems_generated_tokens` 和非空 `flaggems_text`，通过时会打印日志路径和
 Triton dump 目录。
 
-显式指定 Hugging Face 模型时才会下载或复用模型：
-
-```bash
-bash 3-install-model-inference.sh --model-id TinyLlama/TinyLlama-1.1B-Chat-v1.0
-```
-
-只安装依赖，不运行推理：
+只下载或复用默认模型，不运行推理：
 
 ```bash
 bash 3-install-model-inference.sh --skip-inference
+bash 3-install-model-inference.sh --skip-download --skip-inference
 ```
 
 强制使用 FlagTree Python 和 PyTorch wheel，不使用源码编译版 PyTorch：
@@ -385,7 +384,7 @@ bash 3-install-model-inference.sh --pytorch-mode wheel
 
 ```bash
 bash 3-install-model-inference.sh \
-  --model-path /path/to/TinyLlama-TinyLlama-1.1B-Chat-v1.0 \
+  --model-path /path/to/Llama-2-7b-hf \
   --prompt "Explain FlagGems in one sentence." \
   --max-new-tokens 32
 ```
@@ -409,3 +408,6 @@ source ../flagOS-installed/model-inference/env-model-inference.sh
 `model-inference/` 目录只提交必要的推理入口和说明文件。大模型权重通常较大，
 默认下载到安装前缀下的 `models/`，不要提交到 Git；只有很小的测试模型资产才
 可以放入 `model-inference/models/` 并随仓库提交。
+
+Legacy/debug smoke：内置 GPT-2 仅用于显式调试，必须传入
+`--builtin-model builtin-gpt2-random`，不作为默认下载或访问失败时的回退。

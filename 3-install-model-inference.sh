@@ -9,7 +9,9 @@ DEFAULT_SOURCE_DIR="$SCRIPT_DIR/model-inference"
 DEFAULT_FLAGTREE_PREFIX="$SCRIPT_DIR/../flagOS-installed/flagTree"
 DEFAULT_FLAGGEMS_PREFIX="$SCRIPT_DIR/../flagOS-installed/flagGems"
 DEFAULT_PYTORCH_PREFIX="$SCRIPT_DIR/../flagOS-installed/pytorch"
-DEFAULT_MODEL_BACKEND="builtin-gpt2"
+DEFAULT_MODEL_BACKEND="huggingface"
+DEFAULT_MODEL_ID="meta-llama/Llama-2-7b-hf"
+DEFAULT_MODEL_DIRNAME="Llama-2-7b-hf"
 BUILTIN_MODEL_NAME="builtin-gpt2-random"
 DEFAULT_PROMPT="Explain in one sentence what FlagGems does for PyTorch."
 DEFAULT_MAX_NEW_TOKENS=32
@@ -37,6 +39,7 @@ usage() {
   --revision REV          Hugging Face 模型 revision
   --model-path DIR        使用已下载的本地 Hugging Face 模型目录
   --local-dir DIR         模型下载目录
+  --builtin-model NAME    显式使用 legacy/debug 内置 GPT-2 smoke 模型
   --prompt TEXT           推理提示词，默认：$DEFAULT_PROMPT
   --max-new-tokens N      生成 token 数，默认：$DEFAULT_MAX_NEW_TOKENS
   --max-seq N             内置 GPT-2 最大序列长度，默认：$DEFAULT_MAX_SEQ
@@ -47,8 +50,12 @@ usage() {
   -h, --help              显示帮助
 
 说明：
-  默认使用内置随机初始化 GPT-2（n_layer=4, n_head=8, n_embd=512, max_seq=128），
-  不下载模型；传入 --model-id 或 --model-path 时切换到 Hugging Face 模型。
+  默认使用 Hugging Face 模型 meta-llama/Llama-2-7b-hf。
+  本地默认目录为：
+    ../flagOS-installed/model-inference/models/Llama-2-7b-hf
+  若目录完整则复用；若不存在或不完整则下载。官方 LLaMA2 仓库需要
+  HuggingFace 授权，请先设置 HF_TOKEN 或运行 huggingface-cli login。
+  --builtin-model builtin-gpt2-random 仅用于显式 legacy/debug smoke，不作为默认回退。
 EOF
 }
 
@@ -332,6 +339,12 @@ ensure_model_dependencies() {
 
 model_id_to_dirname() {
   local model_id=$1
+
+  if [[ "$model_id" == "$DEFAULT_MODEL_ID" ]]; then
+    printf '%s\n' "$DEFAULT_MODEL_DIRNAME"
+    return 0
+  fi
+
   printf '%s\n' "${model_id//\//-}"
 }
 
@@ -347,6 +360,10 @@ require_usable_model_path() {
 
   [[ -d "$model_path" ]] || die "模型目录不存在：$model_path"
   [[ -f "$model_path/config.json" ]] || die "模型目录缺少 config.json：$model_path"
+  if [[ ! -f "$model_path/tokenizer.json" && ! -f "$model_path/tokenizer.model" &&
+        ! ( -f "$model_path/vocab.json" && -f "$model_path/merges.txt" ) ]]; then
+    die "模型目录缺少 tokenizer 文件：$model_path"
+  fi
   if find "$model_path" -type f -name '*.incomplete' -print -quit | grep -q .; then
     die "模型目录存在未完成的 Hugging Face 下载标记：$model_path"
   fi
@@ -396,6 +413,12 @@ if not weights:
 PY
 }
 
+model_path_is_usable() {
+  local model_path=$1
+
+  (require_usable_model_path "$model_path") >/dev/null 2>&1
+}
+
 download_or_reuse_model() {
   local revision_arg=()
 
@@ -411,6 +434,11 @@ download_or_reuse_model() {
     LOCAL_DIR="$PREFIX/models/$(model_id_to_dirname "$MODEL_ID")"
   fi
   MODEL_PATH=$LOCAL_DIR
+
+  if model_path_is_usable "$MODEL_PATH"; then
+    note '复用完整的本地模型目录。'
+    return 0
+  fi
 
   if [[ "$SKIP_DOWNLOAD" -eq 1 ]]; then
     require_usable_model_path "$MODEL_PATH"
@@ -606,7 +634,7 @@ FLAGTREE_PREFIX=$DEFAULT_FLAGTREE_PREFIX
 FLAGGEMS_PREFIX=$DEFAULT_FLAGGEMS_PREFIX
 PYTORCH_PREFIX=$DEFAULT_PYTORCH_PREFIX
 MODEL_BACKEND=$DEFAULT_MODEL_BACKEND
-MODEL_ID=
+MODEL_ID=$DEFAULT_MODEL_ID
 REVISION=
 MODEL_PATH=
 LOCAL_DIR=
@@ -666,6 +694,12 @@ while [[ $# -gt 0 ]]; do
     --local-dir)
       [[ $# -ge 2 ]] || die '--local-dir 缺少目录参数。'
       LOCAL_DIR=$2
+      shift 2
+      ;;
+    --builtin-model)
+      [[ $# -ge 2 ]] || die '--builtin-model 缺少模型名。'
+      [[ "$2" == "$BUILTIN_MODEL_NAME" ]] || die "--builtin-model 仅支持 $BUILTIN_MODEL_NAME。"
+      MODEL_BACKEND=builtin-gpt2
       shift 2
       ;;
     --prompt)
@@ -786,8 +820,9 @@ printf '模型后端：%s\n' "$MODEL_BACKEND"
 if [[ "$MODEL_BACKEND" == builtin-gpt2 ]]; then
   printf '内置模型：%s\n' "$BUILTIN_MODEL_NAME"
   printf '内置 GPT-2 配置：n_layer=4 n_head=8 n_embd=512 max_seq=%s\n' "$MAX_SEQ"
+else
+  printf '模型 ID：%s\n' "$MODEL_ID"
 fi
-[[ -z "$MODEL_ID" ]] || printf '模型 ID：%s\n' "$MODEL_ID"
 [[ -z "$REVISION" ]] || printf '模型 revision：%s\n' "$REVISION"
 [[ -z "$MODEL_PATH" ]] || printf '本地模型目录：%s\n' "$MODEL_PATH"
 [[ -z "$LOCAL_DIR" ]] || printf '模型下载目录：%s\n' "$LOCAL_DIR"

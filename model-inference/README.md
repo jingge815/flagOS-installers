@@ -11,14 +11,19 @@ bash 0-install-flagtree.sh
 bash 1-install-flaggems.sh
 # optional: build PyTorch from source
 bash 2-install-pytorch.sh
+export HF_TOKEN=<your-token>
+bash 3-install-model-inference.sh --skip-inference
+bash 3-install-model-inference.sh --skip-download --skip-inference
 bash 3-install-model-inference.sh
 ```
 
-`3-install-model-inference.sh` defaults to `builtin-gpt2-random`, a Python
-constructed GPT-2 with `n_layer=4`, `n_head=8`, `n_embd=512`, and
-`max_seq=128`. The default path does not download model weights. The installer
-still installs missing inference Python packages into the selected runtime and
-runs one FlagGems-backed generation.
+`3-install-model-inference.sh` defaults to the official Hugging Face model
+`meta-llama/Llama-2-7b-hf`. Its local model directory is
+`/media/disk/fengjingge/src/flagOS/flagOS-installed/model-inference/models/Llama-2-7b-hf`.
+The installer reuses a complete directory and otherwise downloads the model.
+The official LLaMA2 repository requires HuggingFace authorization: set
+`HF_TOKEN` or run `huggingface-cli login`. Failed download or access does not
+fall back to GPT-2, TinyLlama, or random weights.
 
 PyTorch selection is automatic by default. If `../flagOS-installed/pytorch`
 contains a usable CUDA PyTorch from `2-install-pytorch.sh`, the installer uses
@@ -29,8 +34,8 @@ Useful installer commands:
 
 ```bash
 bash 3-install-model-inference.sh
-bash 3-install-model-inference.sh --model-id TinyLlama/TinyLlama-1.1B-Chat-v1.0
 bash 3-install-model-inference.sh --skip-inference
+bash 3-install-model-inference.sh --skip-download --skip-inference
 bash 3-install-model-inference.sh --pytorch-mode wheel
 source ../flagOS-installed/model-inference/env-model-inference.sh
 ```
@@ -53,12 +58,13 @@ The installer writes logs to
 Triton artifacts to
 `../flagOS-installed/model-inference/artifacts/triton-dumps/<timestamp>/`.
 
-Model weights are downloaded only when `--model-id` is used. Downloaded weights
-go into the configured installation prefix. Only small model files may be
+Downloaded weights go into the configured installation prefix. Only small model files may be
 committed under `model-inference/models/`; large model weights must remain
 outside Git.
 
-For direct debugging with the builtin model:
+Legacy/debug smoke: the builtin GPT-2 model is only for explicit debugging and
+requires `--builtin-model builtin-gpt2-random`; it is never the default or a
+fallback for the official model. For direct debugging with it:
 
 ```bash
 python3 examples/run_llm_with_flaggems.py \

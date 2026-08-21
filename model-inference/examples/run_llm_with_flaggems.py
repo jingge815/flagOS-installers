@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     model_group.add_argument(
         "--builtin-model",
         choices=[BUILTIN_GPT2_MODEL],
-        help="Use a randomly initialized builtin model that does not download weights",
+        help="Use the legacy randomly initialized GPT-2 smoke model; not the default target",
     )
     parser.add_argument(
         "--prompt",
