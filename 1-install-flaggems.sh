@@ -4,13 +4,17 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-DEFAULT_SOURCE_DIR="$SCRIPT_DIR/FlagTree/FlagGems"
+DEFAULT_SOURCE_DIR="$SCRIPT_DIR/FlagGems"
 DEFAULT_PREFIX="$SCRIPT_DIR/../flagOS-installed/flagGems"
 DEFAULT_FLAGTREE_PREFIX="$SCRIPT_DIR/../flagOS-installed/flagTree"
 
-FLAGGEMS_REPOSITORY=https://github.com/flagos-ai/FlagGems.git
+#base
+#FLAGGEMS_REPOSITORY=https://github.com/flagos-ai/FlagGems.git
+#FLAGGEMS_BRANCH=master
+#FLAGGEMS_REVISION=bfbd21ca85dbfa84061fe90a7ced899c85238b13
+
+FLAGGEMS_REPOSITORY=https://github.com/jingge815/FlagGems.git
 FLAGGEMS_BRANCH=master
-FLAGGEMS_REVISION=bfbd21ca85dbfa84061fe90a7ced899c85238b13
 
 RUN_TEST=1
 FORCE_RECLONE=0
@@ -139,10 +143,6 @@ checkout_flaggems() {
 
   git -C "$SOURCE_DIR" diff --quiet || die "源码目录存在已跟踪的修改：$SOURCE_DIR"
   git -C "$SOURCE_DIR" diff --cached --quiet || die "源码目录存在暂存修改：$SOURCE_DIR"
-  git -C "$SOURCE_DIR" fetch --depth 1 origin "$FLAGGEMS_REVISION" >/dev/null 2>&1 || true
-  git -C "$SOURCE_DIR" checkout --detach "$FLAGGEMS_REVISION"
-  [[ $(git -C "$SOURCE_DIR" rev-parse HEAD) == "$FLAGGEMS_REVISION" ]] || \
-    die 'FlagGems 源码提交与预期不一致。'
 }
 
 install_build_requirements() {
@@ -176,7 +176,6 @@ install_flaggems_cpp() {
   git clone --shared "$SOURCE_DIR" "$cpp_repo_dir"
   (
     cd "$cpp_repo_dir"
-    git checkout --detach "$FLAGGEMS_REVISION"
     sed -E 's/^name = "flag-gems-cpp-[A-Za-z0-9_]+"/name = "flag-gems-cpp-cuda"/' \
       cpp/pyproject.toml > cpp/pyproject.toml.tmp
     mv cpp/pyproject.toml.tmp cpp/pyproject.toml

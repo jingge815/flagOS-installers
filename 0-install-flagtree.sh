@@ -8,9 +8,14 @@ DEFAULT_SOURCE_DIR="$SCRIPT_DIR/FlagTree"
 MAX_JOBS=${MAX_JOBS:-8}
 RUN_TEST=1
 
-FLAGTREE_REPOSITORY=https://github.com/KernelLLM/FlagTree.git
-FLAGTREE_BRANCH=common-ir-triton35
-FLAGTREE_REVISION=317f15a426466633c4f37f164b2c58ae9c31bd03
+#FLAGTREE_REPOSITORY=https://github.com/KernelLLM/FlagTree.git
+#FLAGTREE_BRANCH=common-ir-triton35
+#FLAGTREE_REVISION=317f15a426466633c4f37f164b2c58ae9c31bd03
+
+FLAGTREE_REPOSITORY=https://github.com/jingge815/FlagTree.git
+FLAGTREE_BRANCH=develop
+#FLAGTREE_REVISION=317f15a426466633c4f37f164b2c58ae9c31bd03
+
 FLIR_REPOSITORY=https://github.com/kateyijian/flir.git
 FLIR_REVISION=165f387b28e3fdbd03542e7ae9881db902facd16
 
@@ -27,14 +32,20 @@ usage() {
   bash 0-install-flagtree.sh [选项]
 
 选项：
-  --prefix DIR      安装目录，默认：../flagOS-installed/flagTree
-  --source-dir DIR  FlagTree 源码目录，默认：./FlagTree
-  --max-jobs N      编译并行度，默认：$MAX_JOBS
-  --skip-test       跳过安装后的验证
-  -h, --help        显示帮助
+  --prefix DIR          安装目录，默认：../flagOS-installed/flagTree
+  --source-dir DIR      FlagTree 源码目录，默认：./FlagTree
+  --max-jobs N          编译并行度，默认：$MAX_JOBS
+  --skip-test           跳过安装后的验证
+  --pytorch-prefix DIR  PyTorch 安装目录，默认：../flagOS-installed/pytorch
+  --skip-pytorch-sync   跳过"把带 PIM 能力的 triton 同步进 PyTorch 环境"这步
+  -h, --help            显示帮助
 
 说明：
   本脚本不需要 root，不安装 NVIDIA 驱动；目标机器必须已经能运行 nvidia-smi。
+
+  每次构建成功后，默认会把这次编译出的 triton（带 PIM mlir -> C 相关 pass）
+  同步覆盖到 PyTorch 环境自带的那份 triton——原因和风险见
+  sync_triton_to_pytorch 函数的注释；不需要这个行为时用 --skip-pytorch-sync。
 EOF
 }
 
@@ -274,12 +285,14 @@ checkout_flagtree() {
     die "源码目录已存在但不是 Git 仓库：$SOURCE_DIR"
   fi
 
-  git -C "$SOURCE_DIR" diff --quiet || die "源码目录存在已跟踪的修改：$SOURCE_DIR"
-  git -C "$SOURCE_DIR" diff --cached --quiet || die "源码目录存在暂存修改：$SOURCE_DIR"
-  git -C "$SOURCE_DIR" fetch --depth 1 origin "$FLAGTREE_REVISION" >/dev/null 2>&1 || true
-  git -C "$SOURCE_DIR" checkout --detach "$FLAGTREE_REVISION"
-  [[ $(git -C "$SOURCE_DIR" rev-parse HEAD) == "$FLAGTREE_REVISION" ]] || \
-    die 'FlagTree 源码提交与预期不一致。'
+  # ALLOW_DIRTY_FLAGTREE_SOURCE=1 时跳过这条检查：用于本地开发时源码目录带
+  # 未提交改动（比如正在开发的新 pass）也要能走一遍完整安装流程的场景。
+  # 默认还是拒绝，避免脚本后续步骤在带着未提交改动的源码上做 checkout 之类
+  # 操作时出现意外覆盖。
+  if [[ "${ALLOW_DIRTY_FLAGTREE_SOURCE:-0}" != 1 ]]; then
+    git -C "$SOURCE_DIR" diff --quiet || die "源码目录存在已跟踪的修改：$SOURCE_DIR（本地开发可设 ALLOW_DIRTY_FLAGTREE_SOURCE=1 跳过此检查）"
+    git -C "$SOURCE_DIR" diff --cached --quiet || die "源码目录存在暂存修改：$SOURCE_DIR（本地开发可设 ALLOW_DIRTY_FLAGTREE_SOURCE=1 跳过此检查）"
+  fi
 }
 
 checkout_flir() {
@@ -337,8 +350,54 @@ run_validation() {
   "$PYTHON/bin/python" "$EXAMPLES_DIR/matmul_sm80.py"
 }
 
+sync_triton_to_pytorch() {
+  # PyTorch 环境（2-install-pytorch.sh 装的那份）自带一份 triton，但那是走
+  # pip 装的普通版，没有本仓库 FlagTree 源码里的 PIM 相关能力（pim mlir、
+  # LowerPIMSingleTasklet 等 pass）。这两份 triton 同一个 Python 版本
+  # （3.10.20）、同一个 LLVM commit（7d5de303）构建，ABI 兼容，可以直接拿
+  # 这次刚编译出来的文件去覆盖 PyTorch 那份——不这样做的后果：进程里
+  # `import torch`/`transformers` 会先把 PyTorch 自带的普通版 triton 装进
+  # `sys.modules`，之后任何代码都无法再切换到带 PIM 能力的版本（Python 的
+  # `import` 只认进程内第一次加载的那份），这在 flagos-pim-compiler 的真实
+  # 端到端场景里复现过。
+  #
+  # 用 --skip-pytorch-sync 跳过；PyTorch 安装目录不是默认路径时用
+  # --pytorch-prefix 指定。
+  local pytorch_triton="$PYTORCH_PREFIX/python-3.10.20/lib/python3.10/site-packages/triton"
+  local our_triton="$PYTHON/lib/python3.10/site-packages/triton"
+
+  if [[ ! -d "$pytorch_triton" ]]; then
+    note "跳过同步：未找到 PyTorch 环境的 triton（$pytorch_triton 不存在）"
+    return
+  fi
+  if [[ ! -d "$our_triton" ]]; then
+    die "本次构建产物里找不到 triton 包：$our_triton"
+  fi
+
+  note "把带 PIM 能力的 triton 同步进 PyTorch 环境：$pytorch_triton"
+  mkdir -p "$PYTORCH_PREFIX/.triton-backup-pre-pim"
+  cp -f "$pytorch_triton/_C/libtriton.so" \
+    "$PYTORCH_PREFIX/.triton-backup-pre-pim/libtriton.so.orig.$(date +%s)" 2>/dev/null || true
+  cp -f "$pytorch_triton/backends/nvidia/compiler.py" \
+    "$PYTORCH_PREFIX/.triton-backup-pre-pim/compiler.py.orig.$(date +%s)" 2>/dev/null || true
+
+  cp -f "$our_triton/_C/libtriton.so" "$pytorch_triton/_C/libtriton.so"
+  cp -f "$our_triton/backends/pim_sidecar.py" "$pytorch_triton/backends/pim_sidecar.py"
+  cp -f "$our_triton/backends/nvidia/compiler.py" "$pytorch_triton/backends/nvidia/compiler.py"
+  rm -rf "$pytorch_triton/backends/nvidia/bin" "$pytorch_triton/backends/nvidia/include" \
+    "$pytorch_triton/backends/nvidia/lib/cupti"
+  cp -r "$our_triton/backends/nvidia/bin" "$pytorch_triton/backends/nvidia/bin"
+  cp -r "$our_triton/backends/nvidia/include" "$pytorch_triton/backends/nvidia/include"
+  cp -r "$our_triton/backends/nvidia/lib/cupti" "$pytorch_triton/backends/nvidia/lib/cupti"
+  rm -rf "$pytorch_triton/backends/__pycache__" "$pytorch_triton/backends/nvidia/__pycache__"
+
+  note "同步完成。验证：source $PYTORCH_PREFIX/env-pytorch.sh && python3 -c 'from triton._C.libtriton import passes; print(hasattr(passes, \"pim\"))'"
+}
+
 PREFIX=
 SOURCE_DIR=$DEFAULT_SOURCE_DIR
+PYTORCH_PREFIX=
+SKIP_PYTORCH_SYNC=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -361,6 +420,15 @@ while [[ $# -gt 0 ]]; do
       RUN_TEST=0
       shift
       ;;
+    --pytorch-prefix)
+      [[ $# -ge 2 ]] || die '--pytorch-prefix 缺少目录参数。'
+      PYTORCH_PREFIX=$2
+      shift 2
+      ;;
+    --skip-pytorch-sync)
+      SKIP_PYTORCH_SYNC=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -379,6 +447,13 @@ fi
 mkdir -p -- "$PREFIX"
 PREFIX=$(cd -- "$PREFIX" && pwd -P)
 [[ "$PREFIX" != / ]] || die '不能把 / 作为 --prefix。'
+
+if [[ -z "${PYTORCH_PREFIX:-}" ]]; then
+  PYTORCH_PREFIX="$SCRIPT_DIR/../flagOS-installed/pytorch"
+fi
+if [[ -e "$PYTORCH_PREFIX" ]]; then
+  PYTORCH_PREFIX=$(cd -- "$PYTORCH_PREFIX" && pwd -P)
+fi
 
 mkdir -p -- "$(dirname -- "$SOURCE_DIR")"
 if [[ -e "$SOURCE_DIR" ]]; then
@@ -414,6 +489,9 @@ checkout_flagtree
 checkout_flir
 build_flagtree
 install_example
+if [[ "$SKIP_PYTORCH_SYNC" -eq 0 ]]; then
+  sync_triton_to_pytorch
+fi
 
 note 'FlagTree 已安装。'
 printf '环境脚本：source %s\n' "$ENV_FILE"
