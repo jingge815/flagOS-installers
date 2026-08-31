@@ -6,3 +6,4 @@ model-inference/models/
 model-inference/**/__pycache__/
 model-inference/**/*.pyc
 .superpowers/
+.worktrees/
