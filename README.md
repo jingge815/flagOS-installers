@@ -4,7 +4,7 @@
 
 - `0-install-flagtree.sh`：安装 FlagTree/Triton 及其用户态依赖
 - `1-install-flaggems.sh`：在 FlagTree 环境之上安装并验证 FlagGems
-- `2-install-pytorch.sh`：从固定提交源码编译并安装 PyTorch
+- `2-install-pytorch.sh`：安装官方 PyTorch wheel，并同步 FlagTree 的 PIM Triton
 - `3-install-model-inference.sh`：下载或复用 Hugging Face 模型，并运行
   FlagGems 大模型推理
 
@@ -14,7 +14,7 @@
 - 已安装并可使用 NVIDIA 驱动
 - `nvidia-smi` 可以正常运行
 - 可以访问公网下载源码、Python、LLVM、Triton/NVIDIA 编译依赖、PyTorch wheel 和 Python package wheel
-- 不需要 root 权限，但系统需要预装基础命令：`git`、`tar`、`gzip`、`dpkg-deb`、`apt-get`、`make`、`cc`、`c++`、`ar`、`ld`、`curl` 或 `wget`
+- 不需要 root 权限。FlagTree 安装仍需要 `git`、`tar`、`gzip`、`dpkg-deb`、`apt-get`、`make`、`cc`、`c++`、`ar`、`ld`、`curl` 或 `wget`；PyTorch wheel 安装仅需要 `tar`、`gzip`、`awk` 和 `curl` 或 `wget`
 
 本脚本不会安装 NVIDIA 驱动；目标机器必须提前满足 `nvidia-smi` 可用。
 
@@ -242,15 +242,15 @@ TRITON_DUMP_DIR=../flagOS-installed/flagGems/triton-stage-dumps
 
 安装脚本：`2-install-pytorch.sh`
 
-该脚本可在 `0-install-flagtree.sh` 和 `1-install-flaggems.sh` 执行完成后运行，
-但不依赖它们的 Python 或环境脚本。它会在无 root 权限下自动准备独立 Python、
-CUDA 12.8 Toolkit、CUDA Python libraries、PyTorch Python 构建依赖，下载
-PyTorch 源码并编译安装 wheel。
+该脚本需要在 `0-install-flagtree.sh` 成功执行后运行。它会在无 root 权限下准备
+独立 Python，从 PyTorch 官方 CUDA 12.8 wheel 索引安装
+`torch==2.9.1+cu128`，再把 FlagTree 中带 PIM pass 的 Triton 同步进该环境。
+它不会下载 PyTorch 源码、不编译 PyTorch，也不安装 CUDA Toolkit。
 
-- 源码默认下载到 `./pytorch`
 - 默认安装目录是 `../flagOS-installed/pytorch`
-- 代码从 `https://github.com/pytorch/pytorch.git` 下载，并固定到提交 `d38164a545b4a4e4e0cf73ce67173f70574890b6`，对应 `v2.9.1`
-- 安装目录中会放置独立 Python、CUDA Toolkit、Python CUDA libraries、wheel、缓存、日志和环境脚本
+- 默认 FlagTree 目录是 `../flagOS-installed/flagTree`
+- 安装目录中会放置独立 Python、pip cache、PyTorch 与 CUDA Python 运行库、原 Triton 备份和环境脚本
+- 目标机器仍需 Ubuntu 22.04 x86_64、可用的 `nvidia-smi` 和 570+ NVIDIA 驱动
 
 一键安装并验证：
 
@@ -258,19 +258,12 @@ PyTorch 源码并编译安装 wheel。
 bash 2-install-pytorch.sh
 ```
 
-指定安装目录、源码目录和编译并行度：
+指定安装目录和 FlagTree 安装目录：
 
 ```bash
 bash 2-install-pytorch.sh \
   --prefix /path/to/pytorch \
-  --source-dir /path/to/pytorch-source \
-  --max-jobs 16
-```
-
-只准备源码和依赖，不执行源码编译：
-
-```bash
-bash 2-install-pytorch.sh --skip-build
+  --flagtree-prefix /path/to/flagTree
 ```
 
 跳过安装后 CUDA smoke test：
@@ -279,20 +272,12 @@ bash 2-install-pytorch.sh --skip-build
 bash 2-install-pytorch.sh --skip-test
 ```
 
-删除已有 PyTorch 源码后重新 clone：
-
-```bash
-bash 2-install-pytorch.sh --force-reclone
-```
-
 ### 重复执行行为
 
-后续重复执行时，脚本会复用已经存在且校验通过的下载包、独立 Python、
-CUDA Toolkit、pip cache、已生成 wheel 和干净的 `./pytorch` Git 源码目录。
-如果源码目录存在已跟踪修改或暂存修改，脚本会停止，避免覆盖本地改动。
-
-默认不会删除 PyTorch 源码目录中的 `build/`；如果怀疑旧构建缓存影响结果，
-可以加 `--clean-build`。
+后续重复执行时，脚本会复用已经存在的独立 Python 和 pip cache，重新确保
+`torch==2.9.1+cu128` 已安装，并再次从 FlagTree 同步 PIM Triton。覆盖前的
+PyTorch `libtriton.so` 和 NVIDIA compiler 文件会备份到
+`<prefix>/.triton-backup-pre-pim/`。
 
 ### 使用环境
 
@@ -320,14 +305,20 @@ print("shape:", tuple(z.shape))
 PY
 ```
 
+确认 PIM Triton pass 已同步：
+
+```bash
+python -c 'from triton._C.libtriton import passes; print(hasattr(passes, "pim"))'
+```
+
 ## 4. 大模型推理
 
 安装脚本：`3-install-model-inference.sh`
 
-该脚本需要在 `0-install-flagtree.sh` 和 `1-install-flaggems.sh` 成功执行后
-运行。`2-install-pytorch.sh` 是可选步骤：如果已经运行并且
+该脚本需要在 `0-install-flagtree.sh` 和 `1-install-flaggems.sh` 成功执行后运行。
+如果已经运行 `2-install-pytorch.sh` 且
 `../flagOS-installed/pytorch/env-pytorch.sh` 中的 Python 能导入 CUDA PyTorch，
-推理脚本会在 `auto` 模式下优先使用该编译版 PyTorch；否则使用 FlagTree
+推理脚本会在 `auto` 模式下优先使用该 PyTorch 环境；否则使用 FlagTree
 Python 并按需下载 CUDA PyTorch wheel。
 
 ### 手动下载默认 Llama 2 7B HF 模型（必需）
@@ -358,7 +349,7 @@ Python 并按需下载 CUDA PyTorch wheel。
    https_proxy=http://127.0.0.1:7500 \
    all_proxy=http://127.0.0.1:7500 \
    hf download meta-llama/Llama-2-7b-hf \
-     --local-dir /home/fengjingge/.llama/checkpoints/Llama-2-7b-hf \
+     --local-dir ../flagOS-installed/model-inference/models/Llama-2-7b-hf \
      --token xxx
    ```
 
@@ -387,7 +378,7 @@ bash 3-install-model-inference.sh \
 - 本地源码快照：`./model-inference`
 - 默认安装目录：`../flagOS-installed/model-inference`
 - 默认模型：`Llama-2-7b-hf`
-- 默认模型目录：`/media/disk/fengjingge/src/flagOS/flagOS-installed/model-inference/models/Llama-2-7b-hf`
+- 默认模型目录：`../flagOS-installed/model-inference/models/Llama-2-7b-hf`
 - 环境脚本：`../flagOS-installed/model-inference/env-model-inference.sh`
 - 推理日志：`../flagOS-installed/model-inference/logs/inference-YYYYMMDD_HHMMSS.log`
 - Triton dump：`../flagOS-installed/model-inference/artifacts/triton-dumps/<timestamp>/`
@@ -409,7 +400,7 @@ bash 3-install-model-inference.sh --skip-inference
 bash 3-install-model-inference.sh --skip-download --skip-inference
 ```
 
-强制使用 FlagTree Python 和 PyTorch wheel，不使用源码编译版 PyTorch：
+强制使用 FlagTree Python 和 PyTorch wheel，不使用 `2-install-pytorch.sh` 的独立 PyTorch 环境：
 
 ```bash
 bash 3-install-model-inference.sh --pytorch-mode wheel
@@ -419,7 +410,7 @@ bash 3-install-model-inference.sh --pytorch-mode wheel
 
 ```bash
 bash 3-install-model-inference.sh \
-  --model-path /path/to/Llama-2-7b-hf \
+  --model-path ../flagOS-installed/model-inference/models/Llama-2-7b-hf \
   --prompt "Explain FlagGems in one sentence." \
   --max-new-tokens 32
 ```
@@ -443,6 +434,3 @@ source ../flagOS-installed/model-inference/env-model-inference.sh
 `model-inference/` 目录只提交必要的推理入口和说明文件。大模型权重通常较大，
 默认下载到安装前缀下的 `models/`，不要提交到 Git；只有很小的测试模型资产才
 可以放入 `model-inference/models/` 并随仓库提交。
-
-Legacy/debug smoke：内置 GPT-2 仅用于显式调试，必须传入
-`--builtin-model builtin-gpt2-random`，不作为默认下载或访问失败时的回退。

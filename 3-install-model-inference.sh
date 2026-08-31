@@ -184,15 +184,15 @@ raise SystemExit(0 if torch.cuda.is_available() and torch.version.cuda else 1)
 PY
 }
 
-compiled_python_has_cuda_torch() {
-  local compiled_env="$PYTORCH_PREFIX/env-pytorch.sh"
-  local compiled_python="$PYTORCH_PREFIX/python/bin/python"
+installed_python_has_cuda_torch() {
+  local pytorch_env="$PYTORCH_PREFIX/env-pytorch.sh"
+  local pytorch_python="$PYTORCH_PREFIX/python/bin/python"
 
-  [[ -f "$compiled_env" && -x "$compiled_python" ]] || return 1
+  [[ -f "$pytorch_env" && -x "$pytorch_python" ]] || return 1
   (
     # shellcheck disable=SC1090
-    source "$compiled_env"
-    python_has_cuda_torch "$compiled_python"
+    source "$pytorch_env"
+    python_has_cuda_torch "$pytorch_python"
   )
 }
 
@@ -213,17 +213,17 @@ select_runtime() {
       ;;
     compiled)
       [[ -f "$compiled_env" ]] || \
-        die "compiled 模式需要 PyTorch 环境脚本：$compiled_env。请先运行 2-install-pytorch.sh，或改用 --pytorch-mode wheel。"
+        die "PyTorch 环境模式需要环境脚本：$compiled_env。请先运行 2-install-pytorch.sh，或改用 --pytorch-mode wheel。"
       [[ -x "$compiled_python" ]] || \
-        die "compiled 模式需要可执行 Python：$compiled_python。请先运行 2-install-pytorch.sh，或改用 --pytorch-mode wheel。"
-      if ! compiled_python_has_cuda_torch; then
-        die "compiled 模式需要 $compiled_python 能导入 CUDA PyTorch。请确认编译安装成功，或改用 --pytorch-mode wheel。"
+        die "PyTorch 环境模式需要可执行 Python：$compiled_python。请先运行 2-install-pytorch.sh，或改用 --pytorch-mode wheel。"
+      if ! installed_python_has_cuda_torch; then
+        die "PyTorch 环境需要 $compiled_python 能导入 CUDA PyTorch。请确认 2-install-pytorch.sh 安装成功，或改用 --pytorch-mode wheel。"
       fi
       RUNTIME_MODE=compiled
       RUNTIME_PYTHON=$compiled_python
       ;;
     auto)
-      if compiled_python_has_cuda_torch; then
+      if installed_python_has_cuda_torch; then
         RUNTIME_MODE=compiled
         RUNTIME_PYTHON=$compiled_python
       else
@@ -281,8 +281,14 @@ ensure_wheel_torch() {
   if ! python_has_cuda_torch "$RUNTIME_PYTHON"; then
     PIP_CACHE_DIR="$PREFIX/pip-cache" "$RUNTIME_PYTHON" -m pip install \
       --index-url https://download.pytorch.org/whl/cu128 \
-      'torch==2.7.1+cu128'
+      'torch==2.9.1+cu128'
   fi
+}
+
+ensure_pytest() {
+  source_runtime_envs
+  PIP_CACHE_DIR="$PREFIX/pip-cache" PYTHONNOUSERSITE=1 "$RUNTIME_PYTHON" -m pip install \
+    --upgrade 'pytest==8.3.5'
 }
 
 missing_model_requirements() {
@@ -795,6 +801,7 @@ mkdir -p "$PREFIX/pip-cache"
 select_runtime
 install_compiled_runtime_packages
 ensure_wheel_torch
+ensure_pytest
 ensure_model_dependencies
 write_model_inference_env
 if [[ "$MODEL_BACKEND" == huggingface ]]; then
