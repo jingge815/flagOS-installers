@@ -11,12 +11,78 @@
 ## 环境前提
 
 - Ubuntu 22.04 x86_64
-- 已安装并可使用 NVIDIA 驱动
-- `nvidia-smi` 可以正常运行
 - 可以访问公网下载源码、Python、LLVM、Triton/NVIDIA 编译依赖、PyTorch wheel 和 Python package wheel
-- 不需要 root 权限。FlagTree 安装仍需要 `git`、`tar`、`gzip`、`dpkg-deb`、`apt-get`、`make`、`cc`、`c++`、`ar`、`ld`、`curl` 或 `wget`；PyTorch wheel 安装仅需要 `tar`、`gzip`、`awk` 和 `curl` 或 `wget`
 
-本脚本不会安装 NVIDIA 驱动；目标机器必须提前满足 `nvidia-smi` 可用。
+### GPU 是可选的
+
+四个脚本都会自行探测 `nvidia-smi`，两种环境都支持：
+
+| 环境 | 行为 |
+| --- | --- |
+| 有 NVIDIA GPU（驱动 570+） | 装 CUDA 版 torch，行为与之前完全一致 |
+| 纯 CPU，无 GPU 硬件 | 装 CPU 版 torch，跳过十几个 `nvidia-*`/`cuda-*` 包（数 GB） |
+
+想强制某一种，**装 torch 的那两个脚本**（`2-install-pytorch.sh`、
+`3-install-model-inference.sh`）接受这两个开关：
+
+```bash
+bash 2-install-pytorch.sh --torch-cpu    # 强制 CPU 版
+bash 2-install-pytorch.sh --torch-cuda   # 强制 CUDA 版
+```
+
+脚本 0 和 1 不装 torch，没有这两个开关——它们只是把"没有 nvidia-smi 就退出"改成了
+可选检测。
+
+纯 CPU 环境下能做什么、不能做什么，见
+`flagos-pim-compiler/docs/pim-compiler-v0.0.4.md`。简单说：**算子编译（TTIR → pim
+mlir）、7B 推理、NumPy 对拍、GeneSim 仿真全都可用**，产出的 pim mlir 与有 GPU 时逐字节
+相同；不可用的只有"需要真实执行 GPU kernel"的那类步骤。
+
+### 先装这些系统包（需要 root，只此一步）
+
+纯净的 Ubuntu 22.04 缺 `git`、`make`、`cc`、`c++`、`ar`、`ld`、`curl`、`python3`，
+必须先补上：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y build-essential git curl tar gzip python3
+```
+
+装完之后四个脚本本身**不需要 root**。这个清单是在纯净 `ubuntu:22.04` 容器里逐个试出来
+的，四个脚本 `require_command` 的完整并集：`git`、`tar`、`gzip`、`dpkg-deb`、`apt-get`、
+`awk`、`sed`、`find`、`make`、`cc`、`c++`、`ar`、`ld`、`curl` 或 `wget`、`python3`。
+
+注意 `python3` 只有脚本 3 需要（脚本 0/1/2 用的是自带的独立 Python），漏装会在第三步
+报 `缺少命令 python3`。
+
+### 网络不稳时建议设置
+
+安装过程要从 GitHub 和 PyPI 拉几个 GB，跨境网络下默认超时太短：
+
+```bash
+export UV_HTTP_TIMEOUT=600      # GeneSim 的 install.sh 用 uv，默认仅 30 秒
+```
+
+实测遇到过两类网络失败，重跑同一条命令即可继续（脚本每一步都是幂等的）：
+
+- `GnuTLS recv error (-110)`：clone FLIR 子模块时 TLS 中断
+- `Failed to download rich==15.0.0 ... network timeout`：PyPI 下载超时
+
+### 不要直接拷贝已装好的安装目录
+
+`flagOS-installed/` **不能整体打包拷到另一台机器或另一个路径**。pip 生成的 32 个
+命令包装脚本（`cmake`、`ninja`、`lit` …）把解释器绝对路径写进了 shebang：
+
+```
+$ head -1 flagTree/python-3.10.20/bin/cmake
+#!/media/disk/.../flagOS-installed/flagTree/python-3.10.20/bin/python
+```
+
+换路径后这些命令全部失效，FlagTree 编译会报
+`RuntimeError: CMake must be installed to build the following extensions: triton`。
+
+正确做法是在目标机器上跑一遍安装脚本——脚本各步骤都有幂等判断，已存在的 LLVM、
+Python、下载缓存都会自动跳过，不会重复下载。
 
 ## 1. 安装 FlagTree
 
@@ -434,3 +500,58 @@ source ../flagOS-installed/model-inference/env-model-inference.sh
 `model-inference/` 目录只提交必要的推理入口和说明文件。大模型权重通常较大，
 默认下载到安装前缀下的 `models/`，不要提交到 Git；只有很小的测试模型资产才
 可以放入 `model-inference/models/` 并随仓库提交。
+
+## 5. 图编译器与 GeneSim（在四个脚本之后）
+
+四个脚本只负责 FlagOS 软件栈。图编译器和模拟器是两个独立仓库：
+
+```bash
+# 图编译器
+git clone https://github.com/jingge815/flagos-pim-compiler.git
+cd flagos-pim-compiler
+source /path/flagOS-installed/pytorch/env-pytorch.sh
+export PYTORCH_ENV_SCRIPT=/path/flagOS-installed/pytorch/env-pytorch.sh
+export LLAMA2_7B_MODEL_DIR=/path/flagOS-installed/model-inference/models/Llama-2-7b-hf
+export FLAGTREE_PREFIX=/path/flagOS-installed/flagTree
+export GENESIM_ROOT=/path/genesim
+
+# 模拟器：这一步装 uv 并建 .venv，run.sh 的每个子命令都依赖它，不能跳过
+cd /path/genesim
+./install.sh --skip-attacc
+```
+
+`install.sh` 会自行探测 GPU：无 GPU 时装 CPU 版 torch，跳过十几个 `nvidia-*`/`cuda-*`
+包（数 GB）。也可以用 `--torch-cpu` / `--torch-cuda` 强制。
+
+### 可选：GNN 性能预测器
+
+`tests/predictor/` 那一组测试需要额外的可选依赖，默认不装。不装的话跑全量测试会看到 9 个
+失败，报错会指明原因：
+
+```
+ModuleNotFoundError: No module named 'torch_geometric'
+ImportError: the GAT predictor backbone requires torch-geometric;
+  install predictor dependencies with: ./install.sh --predictor
+```
+
+需要这一组测试时执行：
+
+```bash
+./install.sh --predictor        # 装 torch-geometric==2.8.0.post1
+./run.sh --test predictor
+```
+
+性能预测器是独立特性，**不参与 PIM 编译链路**——不装它，图编译、算子编译、仿真闭环
+全部照常工作。
+
+### 纯 CPU 环境的能力边界
+
+| 能力 | 纯 CPU |
+| --- | --- |
+| 算子编译（TTIR → pim mlir） | **可用**，产物与有 GPU 时逐字节相同 |
+| 7B 推理、NumPy 对拍 | **可用** |
+| GeneSim 仿真（含 TP/PP 切分评估） | **可用** |
+| 执行 FlagGems 的 Triton kernel | 不可用（需要 GPU 硬件） |
+| `genesim/scripts/refine_ir_with_flagtree.py` | 不可用，改走 `export_pp_placement.py` |
+
+详见 `flagos-pim-compiler/docs/pim-compiler-v0.0.4.md`。

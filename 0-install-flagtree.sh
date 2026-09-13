@@ -84,7 +84,6 @@ check_platform() {
     die "需要 Ubuntu 22.04，当前为 ${PRETTY_NAME:-未知系统}。"
   [[ $(uname -m) == x86_64 ]] || die "需要 x86_64，当前为 $(uname -m)。"
 
-  require_command nvidia-smi 'NVIDIA 驱动'
   require_command git 'git'
   require_command tar 'tar'
   require_command gzip 'gzip'
@@ -101,7 +100,15 @@ check_platform() {
   if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
     die '缺少 curl 或 wget。'
   fi
-  nvidia-smi >/dev/null 2>&1 || die 'nvidia-smi 不可用，请先确认驱动和 GPU。'
+  # GPU 是可选的：本脚本编译的是 triton（含 PIM pass）和 LLVM，全程在 CPU 上跑，
+  # ptxas / cuda.h / libdevice 都来自下载的 tarball，不需要驱动。有卡就报一下型号，
+  # 没卡也照常装——纯 CPU 机器上算子编译走 opcompiler_bridge/cpu_host.py 的前端路径，
+  # 产出的 pim mlir 与有卡路径逐字节相同。
+  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+    note "检测到 NVIDIA GPU：$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)"
+  else
+    note '未检测到 NVIDIA GPU，按纯 CPU 模式安装（算子编译不需要 GPU 硬件）。'
+  fi
 }
 
 install_python() {

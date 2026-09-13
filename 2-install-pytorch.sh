@@ -7,8 +7,17 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 DEFAULT_PREFIX="$SCRIPT_DIR/../flagOS-installed/pytorch"
 DEFAULT_FLAGTREE_PREFIX="$SCRIPT_DIR/../flagOS-installed/flagTree"
 
-PYTORCH_WHEEL_VERSION=2.9.1+cu128
-PYTORCH_WHEEL_INDEX=https://download.pytorch.org/whl/cu128
+# 两套固定版本：有 GPU 装 CUDA 版，没有就装 CPU 版。torch 版本号一致，只差后缀。
+# CPU 版少掉十几个 nvidia-*/cuda-* 依赖（cuda-toolkit、cudnn、nccl 等，共数 GB），
+# 纯 CPU 机器上一个都用不到——算子编译只需要 TTIR → pim mlir，不执行 GPU kernel。
+PYTORCH_WHEEL_VERSION_CUDA=2.9.1+cu128
+PYTORCH_WHEEL_INDEX_CUDA=https://download.pytorch.org/whl/cu128
+PYTORCH_WHEEL_VERSION_CPU=2.9.1+cpu
+PYTORCH_WHEEL_INDEX_CPU=https://download.pytorch.org/whl/cpu
+# 空表示按机器实际情况自动判断；--torch-cpu / --torch-cuda 可强制。
+TORCH_CPU_ONLY=""
+# 非空时从本地目录装 torch wheel，不联网（离线或网络受限时用）。
+PYTORCH_WHEEL_DIR=""
 PYTHON_ARCHIVE=cpython-3.10.20+20260718-x86_64-unknown-linux-gnu-install_only.tar.gz
 PYTHON_URL=https://github.com/astral-sh/python-build-standalone/releases/download/20260718/cpython-3.10.20%2B20260718-x86_64-unknown-linux-gnu-install_only.tar.gz
 
@@ -22,19 +31,27 @@ usage() {
 选项：
   --prefix DIR           安装目录，默认：../flagOS-installed/pytorch
   --flagtree-prefix DIR  0-install-flagtree.sh 安装目录，默认：../flagOS-installed/flagTree
-  --skip-test            跳过安装后的 CUDA smoke test
+  --skip-test            跳过安装后的 smoke test
+  --torch-cpu            强制装 CPU 版 torch（跳过十几个 nvidia-*/cuda-* 包）
+  --wheel-dir DIR        从本地目录装 torch wheel，不联网（离线/网络受限时用）
+  --torch-cuda           强制装 CUDA 版 torch
   -h, --help             显示帮助
 
 固定版本：
-  PyTorch wheel：torch==$PYTORCH_WHEEL_VERSION
-  wheel 索引：$PYTORCH_WHEEL_INDEX
+  有 GPU：torch==$PYTORCH_WHEEL_VERSION_CUDA（索引 $PYTORCH_WHEEL_INDEX_CUDA）
+  无 GPU：torch==$PYTORCH_WHEEL_VERSION_CPU（索引 $PYTORCH_WHEEL_INDEX_CPU）
   Python：3.10.20
 
 说明：
-  本脚本不需要 root，不编译 PyTorch，也不安装 CUDA Toolkit。它会把官方 CUDA
-  12.8 PyTorch wheel 安装到独立 Python 环境，并在安装后同步 FlagTree 的 PIM
-  Triton。请先成功运行 0-install-flagtree.sh；目标机器仍需 Ubuntu 22.04 x86_64、
-  可用的 nvidia-smi 和 570+ NVIDIA 驱动。
+  本脚本不需要 root，不编译 PyTorch，也不安装 CUDA Toolkit——只下载官方 wheel 并
+  配置环境，然后把 FlagTree 的 PIM Triton 同步进这个 Python 环境。请先成功运行
+  0-install-flagtree.sh。
+
+  GPU 是可选的：探测不到 nvidia-smi 就装 CPU 版 torch，其余步骤完全相同。注意
+  Triton 同步里的 backends/nvidia/{bin,include} 在纯 CPU 上**也要同步**——
+  图编译器需要其中的 cuda.h 和 ptxas，它们是随 pip 包分发的文件，不需要驱动。
+
+  目标机器需 Ubuntu 22.04 x86_64；有 GPU 时还需 570+ NVIDIA 驱动（CUDA 12.8 要求）。
 EOF
 }
 
@@ -93,15 +110,34 @@ check_platform() {
   require_command tar
   require_command gzip
   require_command awk
-  require_command nvidia-smi
   if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
     die '缺少 curl 或 wget。'
   fi
 
-  nvidia-smi >/dev/null 2>&1 || die 'nvidia-smi 不可用，请先确认 NVIDIA 驱动和 GPU。'
-  driver_major=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | awk -F. 'NR == 1 { print $1 }')
-  [[ "$driver_major" =~ ^[0-9]+$ && "$driver_major" -ge 570 ]] || \
-    die "CUDA 12.8 需要 570+ NVIDIA 驱动，当前主版本为 ${driver_major:-未知}。"
+  # GPU 可选。没显式指定就按机器实际情况判断装哪个 wheel。
+  if [[ -z "$TORCH_CPU_ONLY" ]]; then
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+      TORCH_CPU_ONLY=false
+    else
+      TORCH_CPU_ONLY=true
+    fi
+  fi
+
+  if [[ "$TORCH_CPU_ONLY" == true ]]; then
+    PYTORCH_WHEEL_VERSION=$PYTORCH_WHEEL_VERSION_CPU
+    PYTORCH_WHEEL_INDEX=$PYTORCH_WHEEL_INDEX_CPU
+    note '未检测到 NVIDIA GPU（或指定了 --torch-cpu）：装 CPU 版 torch。'
+    note '算子编译不需要 GPU 硬件——只做 TTIR → pim mlir，不执行 GPU kernel。'
+  else
+    PYTORCH_WHEEL_VERSION=$PYTORCH_WHEEL_VERSION_CUDA
+    PYTORCH_WHEEL_INDEX=$PYTORCH_WHEEL_INDEX_CUDA
+    # CUDA 12.8 对驱动有硬要求，这一条只在真要装 CUDA 版时才检查。
+    nvidia-smi >/dev/null 2>&1 || die 'nvidia-smi 不可用；纯 CPU 机器请加 --torch-cpu。'
+    driver_major=$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | awk -F. 'NR == 1 { print $1 }')
+    [[ "$driver_major" =~ ^[0-9]+$ && "$driver_major" -ge 570 ]] || \
+      die "CUDA 12.8 需要 570+ NVIDIA 驱动，当前主版本为 ${driver_major:-未知}。"
+    note "检测到 NVIDIA GPU（驱动 $driver_major）：装 CUDA 版 torch。"
+  fi
 }
 
 install_python() {
@@ -152,7 +188,31 @@ EOF
 }
 
 install_pytorch_wheel() {
-  note "通过官方 cu128 wheel 安装 PyTorch $PYTORCH_WHEEL_VERSION"
+  # 已经装好同一版本就不重复下载：torch wheel 是 184 MB（CPU）/ 约 2.5 GB（CUDA），
+  # 网络不稳时重跑脚本会卡在这一步，而这一步本来就是幂等的。
+  if PYTHONNOUSERSITE=1 "$PYTHON/bin/python" - <<PY >/dev/null 2>&1
+import sys, torch
+sys.exit(0 if torch.__version__ == "$PYTORCH_WHEEL_VERSION" else 1)
+PY
+  then
+    note "PyTorch $PYTORCH_WHEEL_VERSION 已安装，跳过下载"
+    return
+  fi
+
+  # 网络受限时，把 torch wheel 预先放到一个目录，用 --wheel-dir 指过来。
+  # 只有 torch 自己从本地取（它是最大的一个，184 MB / 2.5 GB）；filelock、sympy 等
+  # 小依赖仍走索引，所以这里不能加 --no-index。
+  if [[ -n "$PYTORCH_WHEEL_DIR" ]]; then
+    [[ -d "$PYTORCH_WHEEL_DIR" ]] || die "--wheel-dir 不是目录：$PYTORCH_WHEEL_DIR"
+    note "从本地目录安装 PyTorch $PYTORCH_WHEEL_VERSION（$PYTORCH_WHEEL_DIR）"
+    PYTHONNOUSERSITE=1 "$PYTHON/bin/python" -m pip install --upgrade \
+      --cache-dir "$PIP_CACHE_DIR" --find-links "$PYTORCH_WHEEL_DIR" \
+      --index-url "$PYTORCH_WHEEL_INDEX" \
+      "torch==$PYTORCH_WHEEL_VERSION"
+    return
+  fi
+
+  note "通过官方 wheel 安装 PyTorch $PYTORCH_WHEEL_VERSION（索引 $PYTORCH_WHEEL_INDEX）"
   PYTHONNOUSERSITE=1 "$PYTHON/bin/python" -m pip install --upgrade \
     --cache-dir "$PIP_CACHE_DIR" --index-url "$PYTORCH_WHEEL_INDEX" \
     "torch==$PYTORCH_WHEEL_VERSION"
@@ -213,7 +273,7 @@ run_validation() {
   [[ "$RUN_TEST" -eq 1 ]] || return 0
   # shellcheck disable=SC1090
   source "$ENV_FILE"
-  note '运行 PyTorch CUDA 和 PIM Triton smoke test'
+  note '运行 PyTorch 和 PIM Triton smoke test'
   "$PYTHON/bin/python" - <<'PY'
 import torch
 from triton._C.libtriton import passes
@@ -221,19 +281,25 @@ from triton._C.libtriton import passes
 print("torch:", torch.__version__)
 print("torch cuda:", torch.version.cuda)
 print("cuda available:", torch.cuda.is_available())
-if not torch.cuda.is_available():
-    raise SystemExit("torch.cuda.is_available() is False")
+
+# PIM pass 是这一步真正的判据：图编译器全靠它把 TTIR 降到 pim mlir，缺了就没有
+# 任何后续可言。这一条与有没有 GPU 无关——pass 是 CPU 上跑的 MLIR 变换。
 if not hasattr(passes, "pim"):
     raise SystemExit("PIM Triton passes are unavailable")
+print("PIM Triton passes: OK")
 
+# 矩阵乘只是验证这份 torch 能算数，在哪个设备上算不影响本脚本的目的。
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 torch.manual_seed(0)
-x = torch.randn((128, 128), device="cuda")
-y = torch.randn((128, 128), device="cuda")
+x = torch.randn((128, 128), device=DEVICE)
+y = torch.randn((128, 128), device=DEVICE)
 z = x @ y
-torch.cuda.synchronize()
-expected = torch.matmul(x, y)
-max_error = (z - expected).abs().max().item()
-print("device:", torch.cuda.get_device_name(0))
+if DEVICE == "cuda":
+    torch.cuda.synchronize()
+    print("device:", torch.cuda.get_device_name(0))
+else:
+    print("device: cpu（未检测到 GPU；算子编译不需要 GPU 硬件）")
+max_error = (z - torch.matmul(x, y)).abs().max().item()
 print("max error:", max_error)
 if max_error != 0:
     raise SystemExit(f"unexpected max error: {max_error}")
@@ -258,6 +324,19 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-test)
       RUN_TEST=0
+      shift
+      ;;
+    --torch-cpu)
+      TORCH_CPU_ONLY=true
+      shift
+      ;;
+    --wheel-dir)
+      [[ $# -ge 2 ]] || die '--wheel-dir 缺少目录参数。'
+      PYTORCH_WHEEL_DIR=$2
+      shift 2
+      ;;
+    --torch-cuda)
+      TORCH_CPU_ONLY=false
       shift
       ;;
     -h|--help)

@@ -19,6 +19,8 @@ DEFAULT_MAX_SEQ=128
 
 PYTORCH_MODE=auto
 RUN_TEST=1
+# 空表示按机器实际情况自动判断；--torch-cpu / --torch-cuda 可强制。
+TORCH_CPU_ONLY=""
 SKIP_DOWNLOAD=0
 SKIP_INFERENCE=0
 COMPARE_BASELINE=0
@@ -143,9 +145,19 @@ check_platform() {
     die '缺少 curl 或 wget。'
   fi
 
-  if [[ "$RUN_TEST" -eq 1 ]]; then
-    require_command nvidia-smi
-    nvidia-smi >/dev/null 2>&1 || die 'nvidia-smi 不可用，请先确认 NVIDIA 驱动和 GPU，或使用 --skip-test。'
+  # GPU 可选：没显式指定就按机器实际情况判断。纯 CPU 机器上 7B 推理与算子编译
+  # 都能正常跑（推理走 CPU 后端，算子编译只做 TTIR → pim mlir）。
+  if [[ -z "$TORCH_CPU_ONLY" ]]; then
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+      TORCH_CPU_ONLY=false
+    else
+      TORCH_CPU_ONLY=true
+    fi
+  fi
+  if [[ "$TORCH_CPU_ONLY" == true ]]; then
+    note '未检测到 NVIDIA GPU（或指定了 --torch-cpu）：按纯 CPU 模式安装与验证。'
+  else
+    note '检测到 NVIDIA GPU（或指定了 --torch-cuda）：按 CUDA 模式安装与验证。'
   fi
 }
 
@@ -175,11 +187,21 @@ source_runtime_envs() {
 }
 
 python_has_cuda_torch() {
+  # 这个函数是用来挑运行时（compiled / wheel）的，判据应该是"这份 python 能不能
+  # 导入可用的 torch"，而不是"有没有 CUDA"。纯 CPU 机器上 CUDA 版判据恒为假，会把
+  # 本来可用的已装环境判成不可用、白跑一遍 wheel 安装。
+  #
+  # 有 GPU 时仍然要求 torch 带 CUDA：那种机器上装到 CPU 版 torch 是配置错误。
   local candidate_python=$1
 
   [[ -x "$candidate_python" ]] || return 1
-  "$candidate_python" - <<'PY'
+  TORCH_CPU_ONLY="$TORCH_CPU_ONLY" "$candidate_python" - <<'PY'
+import os
 import torch
+
+if os.environ.get("TORCH_CPU_ONLY") == "true":
+    # 纯 CPU 模式：能 import 就算可用。
+    raise SystemExit(0)
 raise SystemExit(0 if torch.cuda.is_available() and torch.version.cuda else 1)
 PY
 }
@@ -258,14 +280,24 @@ install_compiled_runtime_packages() {
   PIP_CACHE_DIR="$PREFIX/pip-cache" "$RUNTIME_PYTHON" -m pip install \
     "${flaggems_runtime_requirements[@]}"
   "$RUNTIME_PYTHON" -m pip install --no-build-isolation --no-deps "$flaggems_source"
-  "$RUNTIME_PYTHON" - <<'PY'
+  TORCH_CPU_ONLY="$TORCH_CPU_ONLY" \
+    CPU_HOST_DRIVER_PY="$SCRIPT_DIR/cpu-host-driver.py" "$RUNTIME_PYTHON" - <<'PY'
+import os
 from importlib import metadata
 
-import flag_gems
 import torch
+
+# 无 GPU 时先注入编译期 driver，否则 import flag_gems 在 import 期就抛
+# "0 active drivers" / "No device were detected"。详见 cpu-host-driver.py。
+exec(open(os.environ["CPU_HOST_DRIVER_PY"]).read())
+
+import flag_gems
 import triton
 
-if not torch.cuda.is_available() or not torch.version.cuda:
+# 纯 CPU 模式下"能导入 torch"就够了；要求 CUDA 会把可用的环境判成不可用。
+if os.environ.get("TORCH_CPU_ONLY") != "true" and (
+    not torch.cuda.is_available() or not torch.version.cuda
+):
     raise SystemExit("compiled runtime does not provide CUDA PyTorch")
 flagtree_version = metadata.version("flagtree")
 flaggems_version = metadata.version("flag_gems")
@@ -279,9 +311,17 @@ ensure_wheel_torch() {
   source_runtime_envs
 
   if ! python_has_cuda_torch "$RUNTIME_PYTHON"; then
-    PIP_CACHE_DIR="$PREFIX/pip-cache" "$RUNTIME_PYTHON" -m pip install \
-      --index-url https://download.pytorch.org/whl/cu128 \
-      'torch==2.9.1+cu128'
+    # 与 2-install-pytorch.sh 同一套口径：无 GPU 装 +cpu 版，省掉十几个
+    # nvidia-*/cuda-* 包（数 GB），纯 CPU 机器上一个都用不到。
+    if [[ "$TORCH_CPU_ONLY" == true ]]; then
+      PIP_CACHE_DIR="$PREFIX/pip-cache" "$RUNTIME_PYTHON" -m pip install \
+        --index-url https://download.pytorch.org/whl/cpu \
+        'torch==2.9.1+cpu'
+    else
+      PIP_CACHE_DIR="$PREFIX/pip-cache" "$RUNTIME_PYTHON" -m pip install \
+        --index-url https://download.pytorch.org/whl/cu128 \
+        'torch==2.9.1+cu128'
+    fi
   fi
 }
 
@@ -479,24 +519,39 @@ PY
 run_stack_preflight() {
   [[ "$RUN_TEST" -eq 1 ]] || return 0
 
-  note '运行 CUDA / Triton / FlagGems preflight。'
-  "$RUNTIME_PYTHON" - <<'PY'
-import flag_gems
+  note '运行 Triton / FlagGems preflight。'
+  CPU_HOST_DRIVER_PY="$SCRIPT_DIR/cpu-host-driver.py" "$RUNTIME_PYTHON" - <<'PY'
+import os
+
 import torch
+
+HAS_GPU = torch.cuda.is_available()
+
+# 无 GPU 时先注入编译期 driver，否则 import flag_gems 会在 import 期抛
+# "0 active drivers" / "No device were detected"。详见 cpu-host-driver.py。
+exec(open(os.environ["CPU_HOST_DRIVER_PY"]).read())
+
+import flag_gems
 import triton
 
 print(f"torch: {torch.__version__} ({torch.__file__})")
 print(f"triton_import: {triton.__version__} ({triton.__file__})")
 print(f"flag_gems: {getattr(flag_gems, '__version__', 'unknown')} ({flag_gems.__file__})")
-if not torch.cuda.is_available():
-    raise SystemExit("torch.cuda.is_available() is False")
-print(f"gpu: {torch.cuda.get_device_name(0)}")
-with flag_gems.use_gems():
-    x = torch.arange(4, device="cuda", dtype=torch.float32)
-    y = x + 1
-torch.cuda.synchronize()
-if y.detach().cpu().tolist() != [1.0, 2.0, 3.0, 4.0]:
-    raise SystemExit("FlagGems CUDA tensor operation returned an unexpected result")
+
+if HAS_GPU:
+    print(f"gpu: {torch.cuda.get_device_name(0)}")
+    with flag_gems.use_gems():
+        x = torch.arange(4, device="cuda", dtype=torch.float32)
+        y = x + 1
+    torch.cuda.synchronize()
+    if y.detach().cpu().tolist() != [1.0, 2.0, 3.0, 4.0]:
+        raise SystemExit("FlagGems CUDA tensor operation returned an unexpected result")
+else:
+    # 无卡时 FlagGems 的 Triton kernel 无处可跑，这一步只验证 import 成功——
+    # 算子编译不需要执行 kernel。数值正确性由 NumpyBackend 对拍 PyTorch 保证。
+    print("gpu: none（纯 CPU 模式：只验证 import，算子编译不需要执行 kernel）")
+    if (torch.arange(4, dtype=torch.float32) + 1).tolist() != [1.0, 2.0, 3.0, 4.0]:
+        raise SystemExit("CPU tensor operation returned an unexpected result")
 print("flag_gems_preflight: ok")
 PY
 }
@@ -559,12 +614,18 @@ run_inference() {
 }
 
 print_runtime_versions() {
-  "$RUNTIME_PYTHON" - <<'PY'
+  CPU_HOST_DRIVER_PY="$SCRIPT_DIR/cpu-host-driver.py" "$RUNTIME_PYTHON" - <<'PY'
+import os
 import sys
 from importlib import metadata
 
-import flag_gems
 import torch
+
+# 无 GPU 时先注入编译期 driver，否则 import flag_gems 在 import 期就抛
+# "0 active drivers" / "No device were detected"。详见 cpu-host-driver.py。
+exec(open(os.environ["CPU_HOST_DRIVER_PY"]).read())
+
+import flag_gems
 
 print("运行时版本确认：")
 print("python:", sys.executable)
@@ -650,6 +711,14 @@ MAX_SEQ=$DEFAULT_MAX_SEQ
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --torch-cpu)
+      TORCH_CPU_ONLY=true
+      shift
+      ;;
+    --torch-cuda)
+      TORCH_CPU_ONLY=false
+      shift
+      ;;
     --prefix)
       [[ $# -ge 2 ]] || die '--prefix 缺少目录参数。'
       PREFIX=$2

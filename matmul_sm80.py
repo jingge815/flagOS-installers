@@ -130,6 +130,25 @@ def matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 def main() -> None:
+    # 这个示例是 0-install-flagtree.sh 的安装后验证，它跑的是真实 Triton kernel，
+    # 需要 GPU 硬件。纯 CPU 机器上没法执行 kernel，此时退化为"确认 triton 带 PIM
+    # pass"——那才是图编译器真正依赖的能力（算子编译只做 TTIR → pim mlir，不执行）。
+    if not torch.cuda.is_available():
+        from triton._C.libtriton import passes
+
+        if not hasattr(passes, "pim"):
+            raise SystemExit(
+                "triton 缺少 PIM pass：装出来的 FlagTree 不可用于算子编译。"
+            )
+        print("no GPU: 跳过 kernel 执行验证（需要 GPU 硬件）")
+        print("PIM passes: OK  ← 算子编译所需的能力已就位")
+        if _DUMP_DIR:
+            print("mlir pass dump:", os.environ["MLIR_DUMP_PATH"])
+            print("triton stage dumps:", os.environ["TRITON_DUMP_DIR"])
+        else:
+            print("mlir dump dir: not enabled")
+        return
+
     torch.manual_seed(0)
     m, n, k = 513, 769, 1025
     a = torch.randn((m, k), device="cuda", dtype=torch.float16)

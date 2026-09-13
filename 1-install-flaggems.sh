@@ -84,8 +84,13 @@ check_platform() {
   require_command awk
   require_command sed
   require_command find
-  require_command nvidia-smi
-  nvidia-smi >/dev/null 2>&1 || die 'nvidia-smi 不可用，请先确认 NVIDIA 驱动和 GPU。'
+  # GPU 可选：FlagGems 装的是 Python 包，编译期不需要驱动。纯 CPU 机器上它仍然
+  # 可以 import 并被 flagtree_driver 用来抓内核、取 pim mlir（见下面的 smoke test）。
+  if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
+    note "检测到 NVIDIA GPU：$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1)"
+  else
+    note '未检测到 NVIDIA GPU，按纯 CPU 模式安装。'
+  fi
 }
 
 activate_flagtree_environment() {
@@ -237,16 +242,24 @@ EOF
 
 check_python_stack() {
   note '检查 PyTorch/Triton/FlagTree/FlagGems'
-  "$PYTHON_BIN" - <<'PY'
+  CPU_HOST_DRIVER_PY="$SCRIPT_DIR/cpu-host-driver.py" "$PYTHON_BIN" - <<'PY'
 import importlib.metadata as metadata
 import importlib.util
+import os
 
 import torch
+
+# 无 GPU 时先注入编译期 driver，否则 import flag_gems 会在 import 期抛
+# "0 active drivers" / "No device were detected"。详见 cpu-host-driver.py。
+exec(open(os.environ["CPU_HOST_DRIVER_PY"]).read())
+
 import triton
 import flag_gems
 
 print("flag_gems:", getattr(flag_gems, "__version__", "n/a"), flag_gems.__file__)
 print("torch:", torch.__version__, "torch cuda:", torch.version.cuda, "cuda available:", torch.cuda.is_available())
+if not torch.cuda.is_available():
+    print("no GPU: 纯 CPU 模式，算子编译走前端路径（pim mlir 与有卡产物一致）")
 print("triton:", triton.__version__, triton.__file__)
 
 spec = importlib.util.find_spec("flag_tree") or importlib.util.find_spec("flagtree")
@@ -256,8 +269,6 @@ try:
 except metadata.PackageNotFoundError:
     print("FlagTree distribution: not installed")
 
-if not torch.cuda.is_available():
-    raise SystemExit("torch.cuda.is_available() is False")
 PY
   "$PYTHON_BIN" -m pip check
 }
@@ -265,24 +276,37 @@ PY
 run_smoke_test() {
   [[ "$RUN_TEST" -eq 1 ]] || return 0
 
-  note '运行 FlagGems CUDA smoke test，并打印 IR dump 路径'
-  "$PYTHON_BIN" - <<'PY'
+  note '运行 FlagGems smoke test，并打印 IR dump 路径'
+  CPU_HOST_DRIVER_PY="$SCRIPT_DIR/cpu-host-driver.py" "$PYTHON_BIN" - <<'PY'
 import os
 from pathlib import Path
 
 import torch
+
+# 无 GPU 时先注入编译期 driver，否则 import flag_gems 在 import 期就抛。
+# 详见 cpu-host-driver.py。
+HAS_GPU = torch.cuda.is_available()
+exec(open(os.environ["CPU_HOST_DRIVER_PY"]).read())
+
 import flag_gems
 
+DEVICE = "cuda" if HAS_GPU else "cpu"
 torch.manual_seed(0)
-x = torch.randn((128, 128), device="cuda", dtype=torch.float32)
-y = torch.randn((128, 128), device="cuda", dtype=torch.float32)
+x = torch.randn((128, 128), device=DEVICE, dtype=torch.float32)
+y = torch.randn((128, 128), device=DEVICE, dtype=torch.float32)
 
-with flag_gems.use_gems():
+if HAS_GPU:
+    # 无卡时 flag_gems 的 triton kernel 无处可跑，这一步只在有卡时做；
+    # 纯 CPU 机器上 import 成功即达到本 smoke test 的目的（算子编译不需要执行）。
+    with flag_gems.use_gems():
+        z = torch.add(x, y)
+    torch.cuda.synchronize()
+    print("device:", torch.cuda.get_device_name(0))
+else:
     z = torch.add(x, y)
-
-torch.cuda.synchronize()
+    print("device: cpu (no GPU)")
 max_err = (z - (x + y)).abs().max().item()
-print("device:", torch.cuda.get_device_name(0))
+print("flag_gems import:", flag_gems.__file__)
 print("result shape:", tuple(z.shape))
 print("max error:", max_err)
 print("MLIR_ENABLE_DUMP:", os.environ.get("MLIR_ENABLE_DUMP"))

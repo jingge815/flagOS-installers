@@ -6,11 +6,29 @@ from __future__ import annotations
 import argparse
 import contextlib
 import importlib.metadata as metadata
+import os
 import time
 from pathlib import Path
 
-import flag_gems
 import torch
+
+# 无 GPU 时必须在 import flag_gems 之前注入编译期 driver，否则 import 期就抛
+# "0 active drivers" / "No device were detected"。安装脚本会通过
+# CPU_HOST_DRIVER_PY 指到 flagOS-installers/cpu-host-driver.py；直接手工运行本
+# 脚本时该变量可能没设，此时按同目录的相对位置找一次。
+if not torch.cuda.is_available():
+    _shim = os.environ.get("CPU_HOST_DRIVER_PY") or str(
+        Path(__file__).resolve().parents[2] / "cpu-host-driver.py"
+    )
+    if Path(_shim).is_file():
+        exec(open(_shim).read())
+    else:
+        raise SystemExit(
+            f"没有 GPU，且找不到 cpu-host-driver.py（试过 {_shim}）。"
+            "请设 CPU_HOST_DRIVER_PY 指向 flagOS-installers/cpu-host-driver.py。"
+        )
+
+import flag_gems
 import triton
 from transformers import (
     AutoModelForCausalLM,
@@ -18,6 +36,15 @@ from transformers import (
     GPT2Config,
     GPT2LMHeadModel,
 )
+
+# 有 GPU 就用 GPU，没有就用 CPU。模型推理在 CPU 上是完整可用的。
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _sync() -> None:
+    """只在有 GPU 时同步；CPU 上执行本来就是同步的。"""
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
 
 BUILTIN_GPT2_MODEL = "builtin-gpt2-random"
@@ -171,10 +198,17 @@ def generate_once(
     max_new_tokens: int,
     use_gems: bool,
 ) -> tuple[str, float, int, int]:
-    inputs = {key: value.to("cuda") for key, value in tokenizer(prompt, return_tensors="pt").items()}
-    torch.cuda.synchronize()
+    inputs = {key: value.to(DEVICE) for key, value in tokenizer(prompt, return_tensors="pt").items()}
+    _sync()
     start = time.perf_counter()
-    context = flag_gems.use_gems() if use_gems else contextlib.nullcontext()
+    # 无 GPU 时不能启用 FlagGems：它的算子是 Triton kernel，纯 CPU 上无处可跑
+    # （autotune 还要实测计时）。此时退回 PyTorch 原生实现——推理结果照样正确，
+    # 只是不经过 FlagGems 的算子。
+    enable_gems = use_gems and torch.cuda.is_available()
+    if use_gems and not enable_gems:
+        print("  note: 未检测到 GPU，本轮用 PyTorch 原生算子（FlagGems 的 Triton "
+              "kernel 需要 GPU 才能执行）")
+    context = flag_gems.use_gems() if enable_gems else contextlib.nullcontext()
     with torch.inference_mode():
         with context:
             output_ids = model.generate(
@@ -183,7 +217,7 @@ def generate_once(
                 do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
             )
-    torch.cuda.synchronize()
+    _sync()
     prompt_length = inputs["input_ids"].shape[-1]
     new_token_ids = output_ids[0, prompt_length:]
     generated_tokens = new_token_ids.shape[-1]
@@ -203,8 +237,7 @@ def main() -> int:
             raise SystemExit(f"model path is not a directory: {model_path}")
     else:
         model_path = None
-    if not torch.cuda.is_available():
-        raise SystemExit("torch.cuda.is_available() is False")
+    # GPU 可选：无卡时在 CPU 上跑，算子编译与数值对拍都不需要 GPU 硬件。
 
     print("runtime:")
     if args.builtin_model:
@@ -219,7 +252,8 @@ def main() -> int:
     print(f"  flagtree: {distribution_version('flagtree')}")
     print(f"  flag_gems: {distribution_version('flag_gems')}")
     print(f"  transformers: {distribution_version('transformers')}")
-    print(f"  gpu: {torch.cuda.get_device_name(0)}")
+    print(f"  gpu: {torch.cuda.get_device_name(0)}" if torch.cuda.is_available()
+          else "  gpu: none（纯 CPU 模式）")
 
     if args.builtin_model:
         tokenizer, model = create_builtin_gpt2_components(args.max_seq)
@@ -238,7 +272,7 @@ def main() -> int:
             trust_remote_code=False,
         )
     model.eval()
-    model.to("cuda")
+    model.to(DEVICE)
 
     if args.compare_baseline:
         baseline_text, baseline_elapsed, baseline_prompt_tokens, baseline_generated_tokens = generate_once(
