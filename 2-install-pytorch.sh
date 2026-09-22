@@ -51,7 +51,7 @@ usage() {
   Triton 同步里的 backends/nvidia/{bin,include} 在纯 CPU 上**也要同步**——
   图编译器需要其中的 cuda.h 和 ptxas，它们是随 pip 包分发的文件，不需要驱动。
 
-  目标机器需 Ubuntu 22.04 x86_64；有 GPU 时还需 570+ NVIDIA 驱动（CUDA 12.8 要求）。
+  目标机器需 Ubuntu 22.04 或 24.04 x86_64；有 GPU 时还需 570+ NVIDIA 驱动（CUDA 12.8 要求）。
 EOF
 }
 
@@ -103,8 +103,8 @@ check_platform() {
   [[ -r /etc/os-release ]] || die '无法读取 /etc/os-release。'
   # shellcheck disable=SC1091
   source /etc/os-release
-  [[ "${ID:-}" == ubuntu && "${VERSION_ID:-}" == 22.04 ]] || \
-    die "需要 Ubuntu 22.04，当前为 ${PRETTY_NAME:-未知系统}。"
+  [[ "${ID:-}" == ubuntu && ( "${VERSION_ID:-}" == 22.04 || "${VERSION_ID:-}" == 24.04 ) ]] || \
+    die "需要 Ubuntu 22.04 或 24.04，当前为 ${PRETTY_NAME:-未知系统}。"
   [[ $(uname -m) == x86_64 ]] || die "需要 x86_64，当前为 $(uname -m)。"
 
   require_command tar
@@ -173,7 +173,12 @@ if [[ "\${BASH_SOURCE[0]}" == "\$0" ]]; then
 fi
 
 PYTORCH_PREFIX=$prefix_shell
-_pytorch_site_packages="\$PYTORCH_PREFIX/python/lib/python3.10/site-packages"
+_pytorch_python_lib_glob=("\$PYTORCH_PREFIX"/python/lib/python3.*)
+if [[ \${#_pytorch_python_lib_glob[@]} -ne 1 ]]; then
+  echo "错误：\$PYTORCH_PREFIX/python/lib 下应有且只有一个 python3.* 目录，实际找到 \${#_pytorch_python_lib_glob[@]} 个" >&2
+  return 1
+fi
+_pytorch_site_packages="\${_pytorch_python_lib_glob[0]}/site-packages"
 _pytorch_nvidia_dir="\$_pytorch_site_packages/nvidia"
 
 export PATH="\$PYTORCH_PREFIX/python/bin:\$PATH"
@@ -182,7 +187,7 @@ export PIP_CACHE_DIR="\${PIP_CACHE_DIR:-\$PYTORCH_PREFIX/pip-cache}"
 export LD_LIBRARY_PATH="\$_pytorch_nvidia_dir/cuda_runtime/lib:\$_pytorch_nvidia_dir/cuda_nvrtc/lib:\$_pytorch_nvidia_dir/cuda_cupti/lib:\$_pytorch_nvidia_dir/cublas/lib:\$_pytorch_nvidia_dir/cudnn/lib:\$_pytorch_nvidia_dir/cufft/lib:\$_pytorch_nvidia_dir/curand/lib:\$_pytorch_nvidia_dir/cusolver/lib:\$_pytorch_nvidia_dir/cusparse/lib:\$_pytorch_nvidia_dir/cusparselt/lib:\$_pytorch_nvidia_dir/nccl/lib:\$_pytorch_nvidia_dir/nvjitlink/lib:\$_pytorch_nvidia_dir/nvtx/lib\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
 export CMAKE_PREFIX_PATH="\$PYTORCH_PREFIX/python\${CMAKE_PREFIX_PATH:+:\$CMAKE_PREFIX_PATH}"
 
-unset _pytorch_site_packages _pytorch_nvidia_dir
+unset _pytorch_site_packages _pytorch_nvidia_dir _pytorch_python_lib_glob
 EOF
   chmod 0644 "$ENV_FILE"
 }
@@ -218,9 +223,24 @@ PY
     "torch==$PYTORCH_WHEEL_VERSION"
 }
 
+find_unique_site_packages() {
+  local python_root=$1
+  local matches=("$python_root"/lib/python3.*/site-packages)
+
+  [[ ${#matches[@]} -eq 1 && -d "${matches[0]}" ]] || \
+    die "在 $python_root/lib 下未找到唯一的 python3.*/site-packages 目录（找到 ${#matches[@]} 个）。"
+  printf '%s\n' "${matches[0]}"
+}
+
 sync_triton_to_pytorch() {
-  local flagtree_triton="$FLAGTREE_PREFIX/python-3.10.20/lib/python3.10/site-packages/triton"
-  local pytorch_triton="$PYTHON/lib/python3.10/site-packages/triton"
+  local flagtree_python_link="$FLAGTREE_PREFIX/python"
+  local flagtree_site_packages pytorch_site_packages
+  local flagtree_triton pytorch_triton
+
+  flagtree_site_packages=$(find_unique_site_packages "$flagtree_python_link")
+  pytorch_site_packages=$(find_unique_site_packages "$PYTHON_LINK")
+  flagtree_triton="$flagtree_site_packages/triton"
+  pytorch_triton="$pytorch_site_packages/triton"
   local backup_dir="$PREFIX/.triton-backup-pre-pim"
   local source_path destination_path
   local required_files=(
@@ -236,7 +256,21 @@ sync_triton_to_pytorch() {
 
   [[ -d "$flagtree_triton" ]] || \
     die "找不到 FlagTree Triton：$flagtree_triton。请先运行 0-install-flagtree.sh。"
-  [[ -d "$pytorch_triton" ]] || die "PyTorch wheel 未安装 Triton：$pytorch_triton"
+
+  # CPU 版 torch wheel 不依赖 triton（只有 CUDA 版才带），PyTorch 侧没有可覆盖的
+  # 上游 triton，把 FlagTree 那份连同 dist-info 整体装进去；带上 dist-info，pip 才
+  # 知道 triton 已经装好，后续步骤不会再去拉一份上游 triton 把它盖掉。
+  if [[ ! -d "$pytorch_triton" ]]; then
+    note "PyTorch 侧没有 triton（CPU 版 wheel 不带），整体安装 FlagTree 的 PIM Triton"
+    cp -r -- "$flagtree_triton" "$pytorch_triton"
+    local dist_info
+    for dist_info in "$flagtree_site_packages"/triton-*.dist-info; do
+      [[ -d "$dist_info" ]] || \
+        die "找不到 FlagTree Triton 的 dist-info：$flagtree_site_packages/triton-*.dist-info"
+      cp -r -- "$dist_info" "$pytorch_site_packages/"
+    done
+    return
+  fi
 
   for source_path in "${required_files[@]}"; do
     [[ -f "$flagtree_triton/$source_path" ]] || \

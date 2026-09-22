@@ -10,8 +10,11 @@
 
 ## 环境前提
 
-- Ubuntu 22.04 x86_64
+- Ubuntu 22.04 或 24.04，x86_64
 - 可以访问公网下载源码、Python、LLVM、Triton/NVIDIA 编译依赖、PyTorch wheel 和 Python package wheel
+
+两个系统版本都在纯 CPU 容器里跑通过完整流程（Ubuntu 24.04.5 实测）。脚本按
+`/etc/os-release` 的 `ID`/`VERSION_ID` 判断，非 Ubuntu 或非 x86_64 会直接报错退出。
 
 ### GPU 是可选的
 
@@ -30,8 +33,18 @@ bash 2-install-pytorch.sh --torch-cpu    # 强制 CPU 版
 bash 2-install-pytorch.sh --torch-cuda   # 强制 CUDA 版
 ```
 
-脚本 0 和 1 不装 torch，没有这两个开关——它们只是把"没有 nvidia-smi 就退出"改成了
-可选检测。
+脚本 0 和 1 没有这两个开关——它们只是把"没有 nvidia-smi 就退出"改成了可选检测。
+
+需要说明的是脚本 0 确实会装一个 torch：它给自己那份独立 Python 装
+`torch==2.7.1+cu128`，供安装后验证（`matmul_sm80.py`）和后续 FlagGems 的 smoke test
+使用，是 FlagTree 环境自己的运行时 torch。**这一份目前不区分有没有 GPU**，纯 CPU 机器上
+同样会拉十几个 `nvidia-*`/`cuda-*` 包（约 2.5 GB）。它们只是占下载流量和磁盘，不影响
+纯 CPU 流程正确性——验证在无卡时会自动退化为"确认 PIM pass 存在"，不执行 kernel。
+要让它在无卡时改装 `torch==2.7.1+cpu`（省掉这 2.5 GB），改
+`0-install-flagtree.sh` 里 `install_python()` 那一行即可；经确认 FlagTree 的构建过程
+不依赖 torch，只有安装后验证和 FlagGems 用到它。
+
+脚本 2 装的 `torch==2.9.1+cpu`/`+cu128` 是另一份，装在独立的 PyTorch 前缀下，与这份无关。
 
 纯 CPU 环境下能做什么、不能做什么，见
 `flagos-pim-compiler/docs/pim-compiler-v0.0.4.md`。简单说：**算子编译（TTIR → pim
@@ -40,7 +53,7 @@ mlir）、7B 推理、NumPy 对拍、GeneSim 仿真全都可用**，产出的 pi
 
 ### 先装这些系统包（需要 root，只此一步）
 
-纯净的 Ubuntu 22.04 缺 `git`、`make`、`cc`、`c++`、`ar`、`ld`、`curl`、`python3`，
+纯净的 Ubuntu 缺 `git`、`make`、`cc`、`c++`、`ar`、`ld`、`curl`、`python3`，
 必须先补上：
 
 ```bash
@@ -48,12 +61,38 @@ sudo apt-get update
 sudo apt-get install -y build-essential git curl tar gzip python3
 ```
 
-装完之后四个脚本本身**不需要 root**。这个清单是在纯净 `ubuntu:22.04` 容器里逐个试出来
-的，四个脚本 `require_command` 的完整并集：`git`、`tar`、`gzip`、`dpkg-deb`、`apt-get`、
-`awk`、`sed`、`find`、`make`、`cc`、`c++`、`ar`、`ld`、`curl` 或 `wget`、`python3`。
+装完之后四个脚本本身**不需要 root**。这条命令在纯净 `ubuntu:22.04` 和 `ubuntu:24.04`
+容器里都逐个验证过，覆盖四个脚本 `require_command` 的完整并集：`git`、`tar`、`gzip`、
+`dpkg-deb`、`apt-get`、`awk`、`sed`、`find`、`make`、`cc`、`c++`、`ar`、`ld`、
+`curl` 或 `wget`、`python3`。
 
 注意 `python3` 只有脚本 3 需要（脚本 0/1/2 用的是自带的独立 Python），漏装会在第三步
-报 `缺少命令 python3`。
+报 `缺少命令 python3`。脚本 3 只做存在性检查、不调用它，但后面下载 HF 模型要用。
+
+### 24.04 上的 `python3` 和 pip
+
+两个版本的 `python3` 不是同一个：22.04 是 3.10，24.04 是 3.12。四个安装脚本都用自带的
+独立 Python（3.10.20），只有上面这条系统包检查会碰到系统 `python3`，所以版本差异不影响
+安装。
+
+但 **24.04 的系统 Python 默认没有 pip，而且带 PEP 668 的 `EXTERNALLY-MANAGED` 标记**，
+直接往系统 Python 装包会被拒绝：
+
+```text
+error: externally-managed-environment
+```
+
+所以下面「大模型推理」一节里安装 `hf` 命令行时，24.04 上不能用
+`python3 -m pip install`，要改用独立 venv（22.04 用同样写法也没问题）：
+
+```bash
+sudo apt-get install -y python3-venv
+python3 -m venv ~/.hf-cli
+~/.hf-cli/bin/pip install -U "huggingface_hub[cli]"
+~/.hf-cli/bin/hf --help
+```
+
+后续用到 `hf` 的地方，把命令换成 `~/.hf-cli/bin/hf` 即可。
 
 ### 网络不稳时建议设置
 
@@ -309,14 +348,25 @@ TRITON_DUMP_DIR=../flagOS-installed/flagGems/triton-stage-dumps
 安装脚本：`2-install-pytorch.sh`
 
 该脚本需要在 `0-install-flagtree.sh` 成功执行后运行。它会在无 root 权限下准备
-独立 Python，从 PyTorch 官方 CUDA 12.8 wheel 索引安装
-`torch==2.9.1+cu128`，再把 FlagTree 中带 PIM pass 的 Triton 同步进该环境。
-它不会下载 PyTorch 源码、不编译 PyTorch，也不安装 CUDA Toolkit。
+独立 Python，从 PyTorch 官方 wheel 索引安装 torch，再把 FlagTree 中带 PIM pass 的
+Triton 装进该环境。它不会下载 PyTorch 源码、不编译 PyTorch，也不安装 CUDA Toolkit。
 
 - 默认安装目录是 `../flagOS-installed/pytorch`
 - 默认 FlagTree 目录是 `../flagOS-installed/flagTree`
 - 安装目录中会放置独立 Python、pip cache、PyTorch 与 CUDA Python 运行库、原 Triton 备份和环境脚本
-- 目标机器仍需 Ubuntu 22.04 x86_64、可用的 `nvidia-smi` 和 570+ NVIDIA 驱动
+- 有 GPU 时：`torch==2.9.1+cu128`，需要 570+ NVIDIA 驱动
+- 纯 CPU 时：`torch==2.9.1+cpu`，不需要驱动，也不需要 `nvidia-smi`
+
+### 两种 torch 的 Triton 来源不一样
+
+| wheel | triton 从哪来 |
+| --- | --- |
+| `2.9.1+cu128`（CUDA 版） | **自带**上游 `triton==3.3.1`。脚本把 FlagTree 的 PIM 文件覆盖进这份 triton，并把被覆盖的 `libtriton.so`、`compiler.py` 备份到 `<prefix>/.triton-backup-pre-pim/` |
+| `2.9.1+cpu`（CPU 版） | **不带** triton（它的依赖只有 filelock、fsspec、jinja2、networkx、sympy、typing-extensions）。脚本把 FlagTree 那份 triton 连同 `triton-*.dist-info` 整体装进 PyTorch 的 site-packages |
+
+CPU 版这条分支不是优化，是必需：CPU wheel 里根本没有可覆盖的 triton 目录，老写法会直接
+报 `PyTorch wheel 未安装 Triton`。两条分支都保留 `backends/nvidia/{bin,include,lib/cupti}`
+——图编译器要用其中的 `cuda.h` 和 `ptxas`，它们是 pip 包里的**文件**，不需要驱动。
 
 一键安装并验证：
 
@@ -340,10 +390,13 @@ bash 2-install-pytorch.sh --skip-test
 
 ### 重复执行行为
 
-后续重复执行时，脚本会复用已经存在的独立 Python 和 pip cache，重新确保
-`torch==2.9.1+cu128` 已安装，并再次从 FlagTree 同步 PIM Triton。覆盖前的
-PyTorch `libtriton.so` 和 NVIDIA compiler 文件会备份到
-`<prefix>/.triton-backup-pre-pim/`。
+后续重复执行时，脚本会复用已经存在的独立 Python 和 pip cache，用
+`torch.__version__` 与目标版本比对，一致就跳过下载（CPU wheel 有 184 MB，CUDA wheel
+约 2.5 GB，网络不稳时这一步值得跳过），并再次把 FlagTree 的 PIM Triton 装进该环境。
+
+CUDA 版覆盖前会把 PyTorch 的 `libtriton.so` 和 NVIDIA compiler 文件备份到
+`<prefix>/.triton-backup-pre-pim/`（每跑一次产生一份带时间戳的备份，脚本不会自动清理）。
+CPU 版是整体安装，没有可备份的原文件，不会产生备份目录。
 
 ### 使用环境
 
@@ -400,11 +453,15 @@ Python 并按需下载 CUDA PyTorch wheel。
 2. 在 Hugging Face 的 [Access Tokens 页面](https://huggingface.co/settings/tokens)
    创建可读取模型的 token。
 3. 安装 Hugging Face 的 **`hf`** 命令（后续命令使用 `hf`，不是旧的
-   `huggingface-cli`）：
+   `huggingface-cli`）。**24.04 必须用独立 venv**——系统 Python 没有 pip 且带
+   PEP 668 保护，直接 `python3 -m pip install` 会报
+   `error: externally-managed-environment`；22.04 用同样写法也可以：
 
    ```bash
-   python3 -m pip install -U "huggingface_hub[cli]"
-   hf --help
+   sudo apt-get install -y python3-venv
+   python3 -m venv ~/.hf-cli
+   ~/.hf-cli/bin/pip install -U "huggingface_hub[cli]"
+   ~/.hf-cli/bin/hf --help
    ```
 
 4. 通过代理手动下载 HF 格式的 `Llama-2-7b-hf` 检查点；把 `xxx` 替换为上一步
@@ -414,14 +471,15 @@ Python 并按需下载 CUDA PyTorch wheel。
    http_proxy=http://127.0.0.1:7500 \
    https_proxy=http://127.0.0.1:7500 \
    all_proxy=http://127.0.0.1:7500 \
-   hf download meta-llama/Llama-2-7b-hf \
+   ~/.hf-cli/bin/hf download meta-llama/Llama-2-7b-hf \
      --local-dir ../flagOS-installed/model-inference/models/Llama-2-7b-hf \
      --token xxx
    ```
 
-下载完成后，使用
-`--model-path ~/.llama/checkpoints/Llama-2-7b-hf` 让安装脚本复用
-这个本地 HF 格式模型目录。
+下载完成后，用
+`--model-path ../flagOS-installed/model-inference/models/Llama-2-7b-hf`
+让安装脚本复用这个目录（就是上面 `--local-dir` 指定的位置）。换成别的目录也行，
+只要和 `--local-dir` 保持一致。
 
 推荐执行顺序：
 
@@ -432,7 +490,7 @@ bash 1-install-flaggems.sh
 bash 2-install-pytorch.sh
 # 完成上面的 Hugging Face 授权和手动下载后，复用本地 HF 格式模型
 bash 3-install-model-inference.sh \
-  --model-path /home/fengjingge/.llama/checkpoints/Llama-2-7b-hf
+  --model-path ../flagOS-installed/model-inference/models/Llama-2-7b-hf
 ```
 
 全流程不需要 root 权限。脚本会复用已有安装目录和 pip/Hugging Face cache，
@@ -503,25 +561,92 @@ source ../flagOS-installed/model-inference/env-model-inference.sh
 
 ## 5. 图编译器与 GeneSim（在四个脚本之后）
 
-四个脚本只负责 FlagOS 软件栈。图编译器和模拟器是两个独立仓库：
+四个脚本只负责 FlagOS 软件栈。图编译器和模拟器是两个独立仓库，**顺序不能颠倒**：
+GeneSim 的 `install.sh` 会顺带补上图编译器测试要用的 `scipy`、`datasets`，所以先装它。
 
 ```bash
-# 图编译器
-git clone https://github.com/jingge815/flagos-pim-compiler.git
-cd flagos-pim-compiler
-source /path/flagOS-installed/pytorch/env-pytorch.sh
-export PYTORCH_ENV_SCRIPT=/path/flagOS-installed/pytorch/env-pytorch.sh
-export LLAMA2_7B_MODEL_DIR=/path/flagOS-installed/model-inference/models/Llama-2-7b-hf
-export FLAGTREE_PREFIX=/path/flagOS-installed/flagTree
-export GENESIM_ROOT=/path/genesim
+cd /path                       # 与 flagOS-installers 同级即可
 
-# 模拟器：这一步装 uv 并建 .venv，run.sh 的每个子命令都依赖它，不能跳过
 cd /path/genesim
 ./install.sh --skip-attacc
+
+# 后：图编译器
+cd /path
+git clone https://github.com/jingge815/flagos-pim-compiler.git
 ```
 
 `install.sh` 会自行探测 GPU：无 GPU 时装 CPU 版 torch，跳过十几个 `nvidia-*`/`cuda-*`
 包（数 GB）。也可以用 `--torch-cpu` / `--torch-cuda` 强制。
+
+### 配置图编译器的站点路径
+
+图编译器用仓库根目录的 `paths.json` 记录站点路径。**六个键都要填对**。
+
+其中后两个是 **GML 参考产物**——芯方舟底层编译器的标准输出样例，由甲方提供，
+**四个安装脚本都不会产出它们**，需要单独放到某个目录再把路径指过去。需要的文件：
+
+| 键 | 目录内容 | 体积 |
+| --- | --- | --- |
+| `gml_reference_dir` | `relay2gml_graph.gml` + `runtime_files/` | 约 68 MB |
+| `gml_llama2_reference_dir` | `llama2_w4a8_decode_block_0/parser_output/` | 约 246 MB |
+
+实测这约 314 MB 是跑通图编译器全部快速回归所需的最小集合。不配的后果有两层，都要避免：
+
+- 一组结构校验测试直接报 `未配置站点路径 gml_llama2_reference_dir`
+- `export_gml.py` **静默跳过** dtype 覆盖检查与 `--orchestrate` 的文件族检查——
+  输出照样显示"验证全部通过"，但实际少做了两项
+
+```json
+{
+  "pytorch_env_script": "/path/flagOS-installed/pytorch/env-pytorch.sh",
+  "llama2_7b_model_dir": "/path/flagOS-installed/model-inference/models/Llama-2-7b-hf",
+  "flagtree_prefix": "/path/flagOS-installed/flagTree",
+  "genesim_root": "/path/genesim",
+  "gml_reference_dir": "/path/gml-reference",
+  "gml_llama2_reference_dir": "/path/gml-reference/llama2_w4a8_decode_block_0/parser_output"
+}
+```
+
+```json
+{
+  "pytorch_env_script": "/path/flagOS-installed/pytorch/env-pytorch.sh",
+  "llama2_7b_model_dir": "/path/flagOS-installed/model-inference/models/Llama-2-7b-hf",
+  "flagtree_prefix": "/path/flagOS-installed/flagTree",
+  "genesim_root": "/path/genesim",
+  "gml_reference_dir": "/path/gml-reference",
+  "gml_llama2_reference_dir": "/path/gml-reference/llama2_w4a8_decode_block_0/parser_output"
+}
+```
+
+也可以不改文件，用同名环境变量覆盖（`PYTORCH_ENV_SCRIPT`、`LLAMA2_7B_MODEL_DIR`、
+`FLAGTREE_PREFIX`、`GENESIM_ROOT`、`GML_REFERENCE_DIR`、`GML_LLAMA2_REFERENCE_DIR`），
+环境变量优先级更高。确认解析结果：
+
+```bash
+cd /path/flagos-pim-compiler
+source /path/flagOS-installed/pytorch/env-pytorch.sh
+python -c 'from genesim_bridge.paths import describe; print(describe())'
+```
+
+### 验证清单
+
+上面每一步都在纯 CPU 的 Ubuntu 24.04 容器里实测过，预期结果如下。**任何一条对不上都
+说明前面的安装有问题**，先回头查对应脚本的输出，不要直接往下走。
+
+| # | 命令 | 预期 |
+| --- | --- | --- |
+| 1 | `python -m pytest tests/ -q -k "not llama2_7b"` | `714 passed, 42 deselected`（约 2 分钟） |
+| 2 | `python -m pytest tests/ -q -k "llama2_7b"` | `42 passed`（纯 CPU 约 34 分钟，含真实编译 224 个 GEMM） |
+| 3 | `python scripts/export_gml.py --layers 1 --seq-len 16 --out-dir /tmp/gml_out` | 尾部 `验证全部通过（3 项）`，其中「GML 引用集 == 落盘集」会给出文件数 |
+| 4 | `cd /path/genesim && ./run.sh --test sim` | `All simulator tests passed (37/37 test files)` |
+| 5 | `cd /path/genesim && ./run.sh --test config_loader` | `Ran 38 tests ... OK` + `[SUCCESS]` |
+| 6 | `cd /path/genesim && ./run.sh --test model_ir` | `Ran 49 tests ... OK` + `[SUCCESS]` |
+
+第 1、2、3 条都在图编译器目录下执行，并且要先 `source` PyTorch 的 `env-pytorch.sh`。
+第 2 条最慢但最关键——它加载真实 Llama-2-7B 权重，把整条编译链路跑一遍。
+
+第 1 条如果出现成片的 `ERROR ... RuntimeError: 未配置站点路径 gml_*`，就是上面的
+`paths.json` 没配全，不是代码问题。
 
 ### 可选：GNN 性能预测器
 

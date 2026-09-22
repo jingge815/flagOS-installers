@@ -76,8 +76,8 @@ check_platform() {
   [[ -r /etc/os-release ]] || die '无法读取 /etc/os-release。'
   # shellcheck disable=SC1091
   source /etc/os-release
-  [[ "${ID:-}" == ubuntu && "${VERSION_ID:-}" == 22.04 ]] || \
-    die "需要 Ubuntu 22.04，当前为 ${PRETTY_NAME:-未知系统}。"
+  [[ "${ID:-}" == ubuntu && ( "${VERSION_ID:-}" == 22.04 || "${VERSION_ID:-}" == 24.04 ) ]] || \
+    die "需要 Ubuntu 22.04 或 24.04，当前为 ${PRETTY_NAME:-未知系统}。"
   [[ $(uname -m) == x86_64 ]] || die "需要 x86_64，当前为 $(uname -m)。"
 
   require_command git
