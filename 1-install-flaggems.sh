@@ -37,13 +37,12 @@ usage() {
 固定版本：
   仓库：$FLAGGEMS_REPOSITORY
   分支：$FLAGGEMS_BRANCH
-  提交：$FLAGGEMS_REVISION
 
 说明：
   本脚本不需要 root。请先成功运行 0-install-flagtree.sh；本脚本会复用
   ../flagOS-installed/flagTree 中的 Python、PyTorch、FlagTree/Triton、LLVM 和
   NVIDIA 用户态编译工具。如果 ../flagOS-installed/flagGems 已安装部分依赖，
-  pip 会按需复用或更新，源码目录会固定到上面的 commit。
+  pip 会按需复用或更新。
 EOF
 }
 
@@ -240,9 +239,61 @@ EOF
   chmod 0644 "$ENV_FILE"
 }
 
+# 在 /dev/shm 不足时，于独立 mount namespace 里把 $PREFIX/dev-shm bind 到 /dev/shm
+# 后再执行命令。命令本身（含 heredoc 的 python -）原样传递。
+run_with_semaphore_space() {
+  if [[ "${FLAGGEMS_SHM_REDIRECT:-0}" -ne 1 ]]; then
+    "$@"
+    return
+  fi
+  FLAGGEMS_SHM_DIR="$PREFIX/dev-shm" \
+    unshare --user --map-root-user --mount --propagation private -- bash -c \
+    'mount --bind "$FLAGGEMS_SHM_DIR" /dev/shm && chmod 1777 /dev/shm && exec "$@"' _ \
+    "$@"
+}
+
+# FlagGems 在 import 时为每个算子创建 multiprocessing.Lock()（见
+# FlagGems/src/flag_gems/utils/libentry.py）。CPython 用 POSIX 命名信号量实现它，
+# 而 Linux 的 sem_open 固定写到 /dev/shm，不看 TMPDIR。共享机器上 /dev/shm 被
+# 其他用户占满时，import flag_gems 会在装包成功后以
+# OSError: [Errno 28] No space left on device 失败。
+# 这里把 /dev/shm 用一个可写目录覆盖挂载，只作用于本脚本启动的检查/测试进程；
+# 挂载点在进程退出时随 mount namespace 消失，不动机器上已有的 /dev/shm。
+ensure_posix_semaphore_space() {
+  local avail_kb shm_dir
+  shm_dir="$PREFIX/dev-shm"
+  avail_kb=$(df -Pk /dev/shm 2>/dev/null | awk 'NR==2 {print $4}')
+  if [[ -n "$avail_kb" && "$avail_kb" -ge 262144 ]]; then
+    return 0
+  fi
+
+  note "/dev/shm 剩余 ${avail_kb:-未知}KB，不足以创建 FlagGems 的 POSIX 信号量，改用 $shm_dir"
+  mkdir -p -- "$shm_dir"
+  chmod 1777 "$shm_dir"
+  export FLAGGEMS_SHM_REDIRECT=1
+
+  if unshare --user --map-root-user true >/dev/null 2>&1; then
+    FLAGGEMS_SHM_DIR="$shm_dir" \
+      unshare --user --map-root-user --mount --propagation private -- bash -c \
+      'mount --bind "$FLAGGEMS_SHM_DIR" /dev/shm && chmod 1777 /dev/shm && exec "$1" -c "$2"' _ \
+      "$PYTHON_BIN" \
+      'import multiprocessing; multiprocessing.Lock(); print("posix semaphore ok")' \
+      && return 0
+  fi
+
+  die "$(cat <<EOF
+/dev/shm 空间不足，且无法在当前用户下把它重定向到 $shm_dir。
+FlagGems 导入每个算子都会 multiprocessing.Lock()，CPython 把这些 POSIX 信号量放在 /dev/shm。
+请释放 /dev/shm（df -h /dev/shm），或在支持 unshare/user namespace 的环境里重跑本脚本。
+EOF
+)"
+}
+
 check_python_stack() {
   note '检查 PyTorch/Triton/FlagTree/FlagGems'
-  CPU_HOST_DRIVER_PY="$SCRIPT_DIR/cpu-host-driver.py" "$PYTHON_BIN" - <<'PY'
+  # PYTHONNOUSERSITE：只校验本前缀里的包。~/.local 里另有一份 huggingface-hub
+  # 时，user site 排在前缀 site-packages 前面，pip check 会把那份无关安装报成失败。
+  run_with_semaphore_space env PYTHONNOUSERSITE=1 CPU_HOST_DRIVER_PY="$SCRIPT_DIR/cpu-host-driver.py" "$PYTHON_BIN" - <<'PY'
 import importlib.metadata as metadata
 import importlib.util
 import os
@@ -270,14 +321,14 @@ except metadata.PackageNotFoundError:
     print("FlagTree distribution: not installed")
 
 PY
-  "$PYTHON_BIN" -m pip check
+  PYTHONNOUSERSITE=1 "$PYTHON_BIN" -m pip check
 }
 
 run_smoke_test() {
   [[ "$RUN_TEST" -eq 1 ]] || return 0
 
   note '运行 FlagGems smoke test，并打印 IR dump 路径'
-  CPU_HOST_DRIVER_PY="$SCRIPT_DIR/cpu-host-driver.py" "$PYTHON_BIN" - <<'PY'
+  run_with_semaphore_space env PYTHONNOUSERSITE=1 CPU_HOST_DRIVER_PY="$SCRIPT_DIR/cpu-host-driver.py" "$PYTHON_BIN" - <<'PY'
 import os
 from pathlib import Path
 
@@ -387,6 +438,7 @@ install_build_requirements
 install_flaggems_python
 install_flaggems_cpp
 write_environment_file
+ensure_posix_semaphore_space
 check_python_stack
 
 note 'FlagGems 已安装。'

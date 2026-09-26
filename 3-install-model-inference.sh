@@ -127,6 +127,53 @@ reject_root_prefix() {
   [[ "$path" != / ]] || die "不能把 / 作为 $name。"
 }
 
+# FlagGems 在 import 时为每个算子创建 multiprocessing.Lock()（见
+# FlagGems/src/flag_gems/utils/libentry.py）。CPython 用 POSIX 命名信号量实现它，
+# Linux 的 sem_open 固定写到 /dev/shm。共享机器上 /dev/shm 被其他用户占满时，
+# import flag_gems 以 OSError: [Errno 28] No space left on device 失败。
+# /dev/shm 不足时，在独立的 user+mount namespace 里把 $PREFIX/dev-shm 绑定上去，
+# 只作用于本脚本启动的进程，不动机器上已有的 /dev/shm。
+run_with_semaphore_space() {
+  if [[ "${FLAGGEMS_SHM_REDIRECT:-0}" -ne 1 ]]; then
+    "$@"
+    return
+  fi
+  FLAGGEMS_SHM_DIR="$PREFIX/dev-shm" \
+    unshare --user --map-root-user --mount --propagation private -- bash -c \
+    'mount --bind "$FLAGGEMS_SHM_DIR" /dev/shm && chmod 1777 /dev/shm && exec "$@"' _ \
+    "$@"
+}
+
+ensure_posix_semaphore_space() {
+  local avail_kb shm_dir
+  shm_dir="$PREFIX/dev-shm"
+  avail_kb=$(df -Pk /dev/shm 2>/dev/null | awk 'NR==2 {print $4}')
+  if [[ -n "$avail_kb" && "$avail_kb" -ge 262144 ]]; then
+    return 0
+  fi
+
+  note "/dev/shm 剩余 ${avail_kb:-未知}KB，不足以创建 FlagGems 的 POSIX 信号量，改用 $shm_dir"
+  mkdir -p -- "$shm_dir"
+  chmod 1777 "$shm_dir"
+  export FLAGGEMS_SHM_REDIRECT=1
+
+  if unshare --user --map-root-user true >/dev/null 2>&1; then
+    FLAGGEMS_SHM_DIR="$shm_dir" \
+      unshare --user --map-root-user --mount --propagation private -- bash -c \
+      'mount --bind "$FLAGGEMS_SHM_DIR" /dev/shm && chmod 1777 /dev/shm && exec "$1" -c "$2"' _ \
+      "${RUNTIME_PYTHON:-python3}" \
+      'import multiprocessing; multiprocessing.Lock(); print("posix semaphore ok")' \
+      && return 0
+  fi
+
+  die "$(cat <<EOF
+/dev/shm 空间不足，且无法在当前用户下把它重定向到 $shm_dir。
+FlagGems 导入每个算子都会 multiprocessing.Lock()，CPython 把这些 POSIX 信号量放在 /dev/shm。
+请释放 /dev/shm（df -h /dev/shm），或在支持 unshare/user namespace 的环境里重跑本脚本。
+EOF
+)"
+}
+
 check_platform() {
   [[ -r /etc/os-release ]] || die '无法读取 /etc/os-release。'
   # shellcheck disable=SC1091
@@ -280,7 +327,7 @@ install_compiled_runtime_packages() {
   PIP_CACHE_DIR="$PREFIX/pip-cache" "$RUNTIME_PYTHON" -m pip install \
     "${flaggems_runtime_requirements[@]}"
   "$RUNTIME_PYTHON" -m pip install --no-build-isolation --no-deps "$flaggems_source"
-  TORCH_CPU_ONLY="$TORCH_CPU_ONLY" \
+  run_with_semaphore_space env TORCH_CPU_ONLY="$TORCH_CPU_ONLY" \
     CPU_HOST_DRIVER_PY="$SCRIPT_DIR/cpu-host-driver.py" "$RUNTIME_PYTHON" - <<'PY'
 import os
 from importlib import metadata
@@ -520,7 +567,7 @@ run_stack_preflight() {
   [[ "$RUN_TEST" -eq 1 ]] || return 0
 
   note '运行 Triton / FlagGems preflight。'
-  CPU_HOST_DRIVER_PY="$SCRIPT_DIR/cpu-host-driver.py" "$RUNTIME_PYTHON" - <<'PY'
+  run_with_semaphore_space env CPU_HOST_DRIVER_PY="$SCRIPT_DIR/cpu-host-driver.py" "$RUNTIME_PYTHON" - <<'PY'
 import os
 
 import torch
@@ -604,7 +651,7 @@ run_inference() {
   fi
 
   note '运行 FlagGems 模型推理。'
-  if ! "${inference_args[@]}" 2>&1 | tee "$log_file"; then
+  if ! run_with_semaphore_space "${inference_args[@]}" 2>&1 | tee "$log_file"; then
     die "推理运行失败，日志：$log_file"
   fi
 
@@ -614,7 +661,7 @@ run_inference() {
 }
 
 print_runtime_versions() {
-  CPU_HOST_DRIVER_PY="$SCRIPT_DIR/cpu-host-driver.py" "$RUNTIME_PYTHON" - <<'PY'
+  run_with_semaphore_space env CPU_HOST_DRIVER_PY="$SCRIPT_DIR/cpu-host-driver.py" "$RUNTIME_PYTHON" - <<'PY'
 import os
 import sys
 from importlib import metadata
@@ -868,6 +915,7 @@ check_platform
 validate_prerequisites
 mkdir -p "$PREFIX/pip-cache"
 select_runtime
+ensure_posix_semaphore_space
 install_compiled_runtime_packages
 ensure_wheel_torch
 ensure_pytest
