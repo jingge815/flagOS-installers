@@ -132,6 +132,9 @@ Python、下载缓存都会自动跳过，不会重复下载。
 - 代码固定到已验证可编译的提交 `317f15a426466633c4f37f164b2c58ae9c31bd03`
 - FLIR 源码会下载到 `./FlagTree/third_party/flir`，并固定到提交 `165f387b28e3fdbd03542e7ae9881db902facd16`
 - 安装目录中会放置独立 Python、LLVM、Triton/NVIDIA 编译工具、Ubuntu deb sysroot、wheel、缓存、环境脚本和验证示例
+- 构建并验证通过后，会把新编译的 PIM Triton 同步进 PyTorch 安装目录（默认
+  `../flagOS-installed/pytorch`，前提是那里已经装好 PyTorch）——所以重建 FlagTree 之后
+  不需要再跑一次 `2-install-pytorch.sh`
 
 一键安装：
 
@@ -149,6 +152,18 @@ bash 0-install-flagtree.sh --prefix /path/to/flagTree
 
 ```bash
 bash 0-install-flagtree.sh --source-dir /path/to/FlagTree --max-jobs 16
+```
+
+指定要同步的 PyTorch 安装目录（默认 `../flagOS-installed/pytorch`）：
+
+```bash
+bash 0-install-flagtree.sh --pytorch-prefix /path/to/pytorch
+```
+
+只构建、不同步到 PyTorch 环境：
+
+```bash
+bash 0-install-flagtree.sh --skip-pytorch-sync
 ```
 
 跳过安装后验证：
@@ -171,6 +186,23 @@ bash 0-install-flagtree.sh --skip-test
 - 干净的 `./FlagTree` Git 源码目录
 
 构建目录会重新生成，以减少旧构建缓存导致的不确定性。
+
+构建成功后，脚本会把新编译的 PIM Triton 同步进 PyTorch 安装目录，同步清单与
+`2-install-pytorch.sh` 完全一致：`_C/libtriton.so`、`backends/pim_sidecar.py`、
+`backends/nvidia/compiler.py`，以及 `backends/nvidia/` 下的 `bin`、`include`、
+`lib/cupti` 三个目录。因此重建 FlagTree 之后直接
+`source ../flagOS-installed/pytorch/env-pytorch.sh`，用到的就是新编译的 triton。
+
+- PyTorch 前缀里还没有装好的 Python（没跑过 `2-install-pytorch.sh`）时跳过并提示，首次
+  同步仍由 `2-install-pytorch.sh` 完成
+- 同步排在安装后验证之后：这次构建自己先跑通了，才同步过去
+- 覆盖前把原文件备份到 `<pytorch-prefix>/.triton-backup-pre-pim/`，但**只备份一次**——
+  `2-install-pytorch.sh` 是每跑一次备份一份带时间戳的，这边每次重建都会走到，逐次留一份
+  798 MB 的旧 `libtriton.so` 会把磁盘吃光
+- 替换用「同目录临时副本 + rename」而不是 `cp -f`：正在跑的训练或图编译器进程仍然持有旧
+  inode，不会被就地截断的 `libtriton.so` 带崩，也不会读到复制到一半的 nvidia backend 目录
+- 同步后会用 PyTorch 的 Python 验一次 PIM pass；不通过只打印警告，不会把这次成功的构建
+  判成失败
 
 ### 使用环境
 
@@ -397,6 +429,10 @@ bash 2-install-pytorch.sh --skip-test
 CUDA 版覆盖前会把 PyTorch 的 `libtriton.so` 和 NVIDIA compiler 文件备份到
 `<prefix>/.triton-backup-pre-pim/`（每跑一次产生一份带时间戳的备份，脚本不会自动清理）。
 CPU 版是整体安装，没有可备份的原文件，不会产生备份目录。
+
+重建 FlagTree 不需要再跑本脚本：`0-install-flagtree.sh` 构建成功后会自己把新编译的 PIM
+Triton 同步进来（见第 1 节）。两者的同步清单完全一致，只有备份策略不同——本脚本每次运行
+备份一份原文件，`0` 只备份一次。
 
 ### 使用环境
 
