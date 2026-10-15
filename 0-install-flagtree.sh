@@ -205,12 +205,79 @@ download_deb() {
   local package=$1
   local work_dir
   work_dir=$(mktemp -d "$DOWNLOADS/${package}.XXXXXX")
-  (
-    cd "$work_dir"
-    apt-get download "$package"
-  )
+  if ! ( cd "$work_dir" && apt-get download "$package" ); then
+    # 镜像里的 apt 索引会过期：它记住的版本已经从软件源删除，download 得到 404，
+    # 而 apt-get update 需要 root。这里改用当前索引里的文件名直接下载。
+    note "$package 按旧索引下载失败，改从当前软件源索引下载"
+    download_deb_from_fresh_index "$package" "$work_dir" || \
+      die "下载 $package 失败。请检查能否访问 archive.ubuntu.com 与 security.ubuntu.com。"
+  fi
   find "$work_dir" -maxdepth 1 -name '*.deb' -type f -exec mv -f {} "$DEBS/" \;
   rmdir "$work_dir"
+}
+
+# 读当前软件源索引，找到 package 的 Filename 字段，直接下载那个 deb。
+# 不经过 apt 的版本解析，所以不受本地过期索引影响。
+# Ubuntu 22.04 的源在 sources.list（deb 行），24.04 在
+# sources.list.d/*.sources（deb822，一个段落里有多行 URIs、Suites、Components）。
+download_deb_from_fresh_index() {
+  local package=$1
+  local work_dir=$2
+  local url dist component packages filename
+  while read -r url dist component; do
+    [[ -n "$url" && -n "$dist" && -n "$component" ]] || continue
+    packages=$(mktemp)
+    curl --fail --location --silent --show-error --retry 3 \
+      --output "$packages.gz" \
+      "$url/dists/$dist/$component/binary-amd64/Packages.gz" || continue
+    gzip -dc "$packages.gz" > "$packages"
+    rm -f "$packages.gz"
+    filename=$(awk -v pkg="$package" '
+      $1 == "Package:" { found = ($2 == pkg) }
+      found && $1 == "Filename:" { print $2; exit }
+    ' "$packages")
+    rm -f "$packages"
+    [[ -n "$filename" ]] || continue
+    curl --fail --location --retry 3 \
+      --output "$work_dir/$(basename "$filename")" "$url/$filename"
+    return 0
+  done < <(apt_source_entries)
+  return 1
+}
+
+# 把软件源展开成「url dist component」三列，一行一条。
+apt_source_entries() {
+  local file line url dist component
+  for file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+    [[ -f "$file" ]] || continue
+    while read -r line; do
+      [[ "$line" == deb\ * ]] || continue
+      read -r _ url dist component <<<"$line"
+      printf '%s %s %s\n' "$url" "$dist" "$component"
+    done < "$file"
+  done
+  for file in /etc/apt/sources.list.d/*.sources; do
+    [[ -f "$file" ]] || continue
+    awk '
+      /^Types:/ { is_deb = ($2 == "deb") }
+      /^URIs:/ { uri = $2 }
+      /^Suites:/ { $1 = ""; sub(/^ /, ""); suites = $0 }
+      /^Components:/ { $1 = ""; sub(/^ /, ""); components = $0 }
+      /^$/ {
+        if (is_deb && uri != "") print uri "|" suites "|" components
+        is_deb = 0; uri = ""; suites = ""; components = ""
+      }
+      END {
+        if (is_deb && uri != "") print uri "|" suites "|" components
+      }
+    ' "$file" | while IFS='|' read -r url dists components; do
+      for dist in $dists; do
+        for component in $components; do
+          printf '%s %s %s\n' "$url" "$dist" "$component"
+        done
+      done
+    done
+  done
 }
 
 install_development_headers() {
